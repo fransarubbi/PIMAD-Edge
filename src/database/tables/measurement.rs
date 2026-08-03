@@ -54,7 +54,7 @@ pub async fn create_table_measurement(pool: &SqlitePool) -> Result<(), sqlx::Err
             destination_id       TEXT NOT NULL,
             timestamp            INTEGER NOT NULL,
             network_id           TEXT NOT NULL,
-            pulse_counter        INTEGER NOT NULL,
+            pulse_counter        REAL NOT NULL,
             temperature          REAL NOT NULL,
             humidity             REAL NOT NULL,
             air_quality          REAL NOT NULL,
@@ -105,7 +105,7 @@ pub async fn create_table_measurement(pool: &SqlitePool) -> Result<(), sqlx::Err
 ///
 
 pub async fn insert_measurement(
-    pool: &SqlitePool,
+    executor: impl sqlx::Executor<'_, Database = sqlx::Sqlite>,
     data_vec: &Vec<Measurement>,
 ) -> Result<(), sqlx::Error> {
     if data_vec.is_empty() {
@@ -133,7 +133,7 @@ pub async fn insert_measurement(
     });
 
     let query = query_builder.build();
-    query.execute(pool).await?;
+    query.execute(executor).await?;
 
     Ok(())
 }
@@ -168,6 +168,8 @@ pub async fn insert_measurement(
 /// - La lógica específica del SQL se delega a [`pop_batch_generic`].
 ///
 
-pub async fn pop_batch_measurement(pool: &SqlitePool) -> Result<Vec<Measurement>, sqlx::Error> {
-    pop_batch_generic(pool, "measurement").await
+pub async fn pop_batch_measurement(
+    executor: impl sqlx::Executor<'_, Database = sqlx::Sqlite>,
+) -> Result<Vec<Measurement>, sqlx::Error> {
+    pop_batch_generic(executor, "measurement").await
 }

@@ -47,6 +47,7 @@ pub async fn create_table_alert_temp(pool: &SqlitePool) -> Result<(), sqlx::Erro
             sender_user_id       TEXT NOT NULL,
             destination_id       TEXT NOT NULL,
             timestamp            INTEGER NOT NULL,
+            network_id           TEXT NOT NULL,
             initial_temp         REAL NOT NULL,
             actual_temp          REAL NOT NULL
         );
@@ -95,9 +96,10 @@ pub async fn create_table_alert_temp(pool: &SqlitePool) -> Result<(), sqlx::Erro
 ///   (controlados por `BATCH_SIZE` en capas superiores).
 ///
 
-pub async fn insert_alert_temp(pool: &SqlitePool,
-                               data_vec: &Vec<AlertTh>
-                              ) -> Result<(), sqlx::Error> {
+pub async fn insert_alert_temp(
+    executor: impl sqlx::Executor<'_, Database = sqlx::Sqlite>,
+    data_vec: &Vec<AlertTh>,
+) -> Result<(), sqlx::Error> {
 
     if data_vec.is_empty() {
         return Ok(());
@@ -120,7 +122,7 @@ pub async fn insert_alert_temp(pool: &SqlitePool,
     });
 
     let query = query_builder.build();
-    query.execute(pool).await?;
+    query.execute(executor).await?;
 
     Ok(())
 }
@@ -156,7 +158,9 @@ pub async fn insert_alert_temp(pool: &SqlitePool,
 /// - La lógica específica del SQL se delega a [`pop_batch_generic`].
 ///
 
-pub async fn pop_batch_alert_temp(pool: &SqlitePool) -> Result<Vec<AlertTh>, sqlx::Error> {
-    pop_batch_generic(pool, "alert_temp").await
+pub async fn pop_batch_alert_temp(
+    executor: impl sqlx::Executor<'_, Database = sqlx::Sqlite>,
+) -> Result<Vec<AlertTh>, sqlx::Error> {
+    pop_batch_generic(executor, "alert_temp").await
 }
 

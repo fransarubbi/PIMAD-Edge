@@ -97,7 +97,7 @@ pub async fn delete_hub_according_to_id(pool: &SqlitePool, id: &str) -> Result<(
     sqlx::query(
         r#"
         DELETE FROM hub
-        WHERE sender_user_id = ?
+        WHERE id = ?
         "#
     )
         .bind(id)

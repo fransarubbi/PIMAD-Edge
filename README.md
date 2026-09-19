@@ -1,4 +1,4 @@
-# IoT Edge Gateway
+# PIMAD Edge
 
 An Edge gateway for IoT networks written in Rust. Its objective is to connect physical hubs with the cloud, providing:
 
@@ -104,4 +104,3 @@ Caching Strategy:
 - Repository / Façade: encapsulates SQLite access (`Repository`).
 - Actor Model / Task-based: each service runs in its own asynchronous task and they communicate via `mpsc` channels.
 - Store and Forward: to ensure entry
-

@@ -23,7 +23,7 @@ use crate::fsm::domain::{
 };
 
 use crate::message::domain::{
-    HandshakeToHub, Heartbeat, HubMessage, Metadata, PhaseNotification, StateToHub
+    HandshakeToHub, Heartbeat, HubMessage, Metadata, PhaseNotification, StateToHub,
 };
 use crate::quorum::domain::ProtocolSettings;
 use chrono::Utc;
@@ -47,8 +47,8 @@ use tracing::{debug, error, info, instrument};
 /// 2.  **Quorum:** Evalúa mensajes `EmptyQueue` para determinar si el sistema puede transicionar de estado.
 /// 3.  **Ping/Pong:** Responde automáticamente a solicitudes de diagnóstico de red.
 /// 4.  **Ejecución de Acciones:** Delega las acciones recibidas a `handle_action`.
-#[instrument(name = "fsm", skip_all)]
-pub async fn fsm(
+#[instrument(name = "handle_events_and_actions", skip_all)]
+pub async fn handle_events_and_actions(
     tx_to_core: mpsc::Sender<FsmServiceResponse>,
     tx_to_fsm: mpsc::Sender<Event>,
     tx_to_timer: mpsc::Sender<Event>,
@@ -59,80 +59,26 @@ pub async fn fsm(
     app_context: AppContext,
     cancel: CancellationToken,
 ) {
-    info!("iniciando tarea fsm");
-    let mut current_epoch: u32 = 0;
+    info!("iniciando tarea handle_events_and_actions");
     let mut session: UpdateSession = UpdateSession::new();
+    let mut current_epoch: u32 = 0;
 
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
-                info!("shutdown recibido fsm");
+                info!("shutdown recibido handle_events_and_actions");
                 break;
             }
 
             Some(msg) = rx_command.recv() => {
-                match msg {
-                    FsmServiceCommand::FromHub(hub_msg) => {
-                        match hub_msg {
-                            HubMessage::HandshakeFromHub(handshake) => {
-                                match session.get_state() {
-                                    StateOfSession::InHandshake | StateOfSession::OutHandshake | StateOfSession::RepeatHandshake => {
-                                        if handshake.balance_epoch == current_epoch {
-                                            session.insert_handshake(handshake.metadata.sender_user_id, handshake.balance_epoch);
-                                            if tx_to_fsm.send(Event::NewMessageHandshake).await.is_err() {
-                                                error!("no se pudo enviar evento NewMessageHandshake");
-                                            }
-                                        }
-                                    },
-                                    _ => {}
-                                }
-                            },
-                            HubMessage::EmptyQueue(msg) => {
-                                match session.get_state() {
-                                    StateOfSession::PhaseAlert | StateOfSession::PhaseData | StateOfSession::PhaseMonitor => {
-                                        quorum_phase(&mut session,
-                                                     &tx_to_fsm,
-                                                     &app_context,
-                                                     HubMessage::EmptyQueue(msg),
-                                                     &tx_to_timer).await;
-                                    },
-                                    _ => {}
-                                }
-                            },
-                            HubMessage::EmptyQueueSafe(msg) => {
-                                match session.get_state() {
-                                    StateOfSession::SafeMode => {
-                                        quorum_safe_mode(&mut session,
-                                                         &tx_to_fsm,
-                                                         &app_context,
-                                                         HubMessage::EmptyQueueSafe(msg),
-                                                         &tx_to_timer).await;
-                                    },
-                                    _ => {}
-                                }
-                            },
-                            _ => {}
-                        }
-                    },
-                    FsmServiceCommand::ErrorEpoch => {
-                        if tx_to_fsm.send(Event::BalanceEpochNotOk).await.is_err() {
-                            error!("no se pudo enviar comando BalanceEpochNotOk");
-                        }
-                    },
-                    FsmServiceCommand::Epoch(epoch) => {
-                        current_epoch = epoch + 1;
-                        if tx_to_fsm.send(Event::BalanceEpochOk).await.is_err() {
-                            error!("no se pudo enviar comando BalanceEpochOk");
-                        }
-                        if tx_to_core.send(FsmServiceResponse::NewEpoch(current_epoch)).await.is_err() {
-                            error!("no se pudo enviar comando NewEpoch");
-                        }
-                        if tx_to_edge_state.send(StateGlobal::BalanceMode(current_epoch)).await.is_err() {
-                            error!("no se pudo enviar StateGlobal::BalanceMode a edge_state");
-                        }
-                    },
-                    _ => {}
-                }
+                handle_events(
+                    msg,
+                    &tx_to_core,
+                    &tx_to_fsm,
+                    &tx_to_timer,
+                    &app_context,
+                    &mut current_epoch,
+                ).await;
             }
 
             Some(vec_action) = rx_from_fsm.recv() => {
@@ -145,8 +91,8 @@ pub async fn fsm(
                         &tx_to_timer,
                         &tx_to_heartbeat,
                         &tx_to_edge_state,
-                        &mut current_epoch,
-                        &mut session
+                        &mut session,
+                        &current_epoch,
                     ).await;
                 }
             }
@@ -154,101 +100,93 @@ pub async fn fsm(
     }
 }
 
-/// Tarea asíncrona que gestiona el envío periódico del mensaje de estado al servidor y a los hub.
-///
-/// # Canal Monitorizado
-/// * `rx_command`: Mensajes de tipo StateGlobal proveniente de `handle_action`.
-///
-#[instrument(name = "edge_state", skip_all)]
-pub async fn edge_state(
-    tx: mpsc::Sender<FsmServiceResponse>,
-    mut rx_command: mpsc::Receiver<StateGlobal>,
-    app_context: AppContext,
-    cancel: CancellationToken,
+async fn handle_events(
+    msg: FsmServiceCommand,
+    tx_to_core: &mpsc::Sender<FsmServiceResponse>,
+    tx_to_fsm: &mpsc::Sender<Event>,
+    tx_to_timer: &mpsc::Sender<Event>,
+    app_context: &AppContext,
+    current_epoch: &mut u32,
 ) {
-    let mut state: StateGlobal = StateGlobal::Start;
-    let mut ticker = interval(Duration::from_secs(10));
+    let mut session: UpdateSession = UpdateSession::new();
 
-    loop {
-        tokio::select! {
-            _ = cancel.cancelled() => {
-                info!("shutdown recibido edge_state");
-                break;
-            }
-
-            _ = ticker.tick() => {
-                match state {
-                    StateGlobal::BalanceMode(epoch) => {
-                        if tx.send(FsmServiceResponse::EdgeState("Balance".to_string())).await.is_err() {
-                            error!("no se pudo enviar mensaje EdgeState periódico");
-                        }
-                        let metadata = build_metadata(&app_context, "all");
-                        let state = StateToHub {
-                            metadata,
-                            state: "balance".to_string(),
-                            balance_epoch: epoch,
-                            duration: 300,
-                            frequency: 0,
-                            jitter: 0,
-                        };
-                        if tx.send(FsmServiceResponse::ToHub(HubMessage::StateToHub(state))).await.is_err() {
-                            error!("no se pudo enviar mensaje EdgeState periódico");
-                        }
-                    },
-                    StateGlobal::Normal => {
-                        if tx.send(FsmServiceResponse::EdgeState("Normal".to_string())).await.is_err() {
-                            error!("no se pudo enviar mensaje EdgeState periódico");
-                        }
-                        let metadata = build_metadata(&app_context, "all");
-                        let state = StateToHub {
-                            metadata,
-                            state: "normal".to_string(),
-                            balance_epoch: 0,
-                            duration: 0,
-                            frequency: 0,
-                            jitter: 0,
-                        };
-                        if tx.send(FsmServiceResponse::ToHub(HubMessage::StateToHub(state))).await.is_err() {
-                            error!("no se pudo enviar mensaje EdgeState periódico");
+    match msg {
+        FsmServiceCommand::FromHub(hub_msg) => match hub_msg {
+            HubMessage::HandshakeFromHub(handshake) => match session.get_state() {
+                StateOfSession::InHandshake
+                | StateOfSession::OutHandshake
+                | StateOfSession::RepeatHandshake => {
+                    if handshake.balance_epoch == *current_epoch {
+                        session.insert_handshake(
+                            handshake.metadata.sender_user_id,
+                            handshake.balance_epoch,
+                        );
+                        if tx_to_fsm.send(Event::NewMessageHandshake).await.is_err() {
+                            error!("no se pudo enviar evento NewMessageHandshake");
                         }
                     }
-                    StateGlobal::SafeMode => {
-                        if tx.send(FsmServiceResponse::EdgeState("SafeMode".to_string())).await.is_err() {
-                            error!("no se pudo enviar mensaje EdgeState periódico");
-                        }
-                        let metadata = build_metadata(&app_context, "all");
-                        let jitter = fastrand::u32(0..=5);
-                        let state = StateToHub {
-                            metadata: metadata.clone(),
-                            state: "safe".to_string(),
-                            balance_epoch: 0,
-                            duration: 0,
-                            frequency: app_context.quorum.get_frequency_safe_mode(),
-                            jitter,
-                        };
-                        if tx.send(FsmServiceResponse::ToHub(HubMessage::StateToHub(state))).await.is_err() {
-                            error!("no se pudo enviar mensaje EdgeState periódico");
-                        }
-                    }
-                    _ => {}
                 }
-            }
-
-            Some(msg) = rx_command.recv() => {
-                match msg {
-                    StateGlobal::BalanceMode(epoch) => {
-                        state = StateGlobal::BalanceMode(epoch);
-                    },
-                    StateGlobal::Normal => {
-                        state = StateGlobal::Normal;
-                    },
-                    StateGlobal::SafeMode => {
-                        state = StateGlobal::SafeMode;
-                    }
-                    _ => {}
+                _ => {}
+            },
+            HubMessage::EmptyQueue(msg) => match session.get_state() {
+                StateOfSession::PhaseAlert
+                | StateOfSession::PhaseData
+                | StateOfSession::PhaseMonitor => {
+                    quorum_phase(
+                        &mut session,
+                        &tx_to_fsm,
+                        &app_context,
+                        HubMessage::EmptyQueue(msg),
+                        &tx_to_timer,
+                    )
+                    .await;
                 }
+                _ => {}
+            },
+            HubMessage::EmptyQueueSafe(msg) => match session.get_state() {
+                StateOfSession::SafeMode => {
+                    quorum_safe_mode(
+                        &mut session,
+                        &tx_to_fsm,
+                        &app_context,
+                        HubMessage::EmptyQueueSafe(msg),
+                        &tx_to_timer,
+                    )
+                    .await;
+                }
+                _ => {}
+            },
+            _ => {}
+        },
+        FsmServiceCommand::ErrorEpoch => {
+            if tx_to_fsm.send(Event::BalanceEpochNotOk).await.is_err() {
+                error!("no se pudo enviar comando BalanceEpochNotOk");
             }
         }
+        FsmServiceCommand::Epoch(epoch) => {
+            *current_epoch = epoch + 1;
+            if tx_to_fsm.send(Event::BalanceEpochOk).await.is_err() {
+                error!("no se pudo enviar comando BalanceEpochOk");
+            }
+            if tx_to_core
+                .send(FsmServiceResponse::NewEpoch(*current_epoch))
+                .await
+                .is_err()
+            {
+                error!("no se pudo enviar comando NewEpoch");
+            }
+        }
+        FsmServiceCommand::LocalConnected => {
+            if tx_to_fsm.send(Event::LocalConnected).await.is_err() {
+                error!("no se pudo enviar comando LocalConnected");
+            }
+        }
+        FsmServiceCommand::LocalDisconnected => {
+            if tx_to_fsm.send(Event::LocalDisconnected).await.is_err() {
+                error!("no se pudo enviar comando LocalDisconnected");
+            }
+        }
+        _ => {}
     }
 }
 
@@ -271,13 +209,20 @@ async fn handle_action(
     tx_to_timer: &mpsc::Sender<Event>,
     tx_to_heartbeat: &mpsc::Sender<Action>,
     tx_to_edge_state: &mpsc::Sender<StateGlobal>,
-    current_epoch: &mut u32,
     session: &mut UpdateSession,
+    current_epoch: &u32,
 ) {
     match action {
         Action::OnEntryBalance(sub_bm) => match sub_bm {
             SubStateBalanceMode::InitBalanceMode => {
                 debug!("entrando a init_balance_mode");
+                if tx_to_edge_state
+                    .send(StateGlobal::BalanceMode)
+                    .await
+                    .is_err()
+                {
+                    error!("no se pudo enviar StateGlobal::BalanceMode a edge_state");
+                }
                 let mut flag = true;
                 loop {
                     if tx_to_core.send(FsmServiceResponse::GetEpoch).await.is_err() {
@@ -335,9 +280,6 @@ async fn handle_action(
                 .await;
             }
         },
-        Action::CalculateQuorum => {
-            quorum_algorithm(session, tx_to_fsm, app_context).await;
-        }
         Action::OnEntryPhase(sub_p) => {
             session.reset_total_attempts();
             session.reset_handshake_hash();
@@ -388,15 +330,13 @@ async fn handle_action(
         Action::OnEntrySafeMode => {
             session.reset_empty_hash();
             session.set_state(StateOfSession::SafeMode);
-            on_entry_safe_mode(
-                tx_to_timer,
-                tx_to_heartbeat,
-                app_context,
-            )
-            .await;
+            on_entry_safe_mode(tx_to_timer, tx_to_heartbeat, app_context).await;
             if tx_to_edge_state.send(StateGlobal::SafeMode).await.is_err() {
                 error!("no se pudo enviar StateGlobal::SafeMode a edge_state");
             }
+        }
+        Action::CalculateQuorum => {
+            quorum_algorithm(session, tx_to_fsm, app_context).await;
         }
         Action::StopTimer => {
             if tx_to_timer.send(Event::StopTimer).await.is_err() {
@@ -421,7 +361,271 @@ async fn handle_action(
                 error!("no se pudo enviar acción StopSendHeartbeatMessageSafeMode");
             }
         }
+        Action::StopSendHeartbeatMessageNormal => {
+            if tx_to_heartbeat
+                .send(Action::StopSendHeartbeatMessageNormal)
+                .await
+                .is_err()
+            {
+                error!("no se pudo enviar acción StopSendHeartbeatMessageNormal");
+            }
+        }
         _ => {}
+    }
+}
+
+/// Tarea asíncrona que ejecuta la lógica pura de la Máquina de Estados.
+///
+/// Mantiene el estado persistente (`FsmState`) y avanza pasos tras recibir eventos.
+///
+/// * `tx_actions`: Canal para emitir los efectos secundarios que deben ejecutarse.
+/// * `rx_event`: Canal de entrada de eventos (triggers).
+#[instrument(name = "run_fsm", skip_all)]
+pub async fn run_fsm(
+    tx_actions: mpsc::Sender<Vec<Action>>,
+    mut rx_event: mpsc::Receiver<Event>,
+    cancel: CancellationToken,
+) {
+    info!("iniciando tarea fsm");
+    let mut state = FsmState::new();
+
+    handle_transition(state.step(Event::Start), &mut state, &tx_actions).await;
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                info!("shutdown recibido run_fsm");
+                break;
+            }
+            Some(event) = rx_event.recv() => {
+                handle_transition(state.step(event), &mut state, &tx_actions).await;
+            }
+        }
+    }
+}
+
+/// Watchdog Timer (Perro guardián) para el envío de Heartbeats.
+///
+/// Si este timer expira sin ser reseteado o detenido, envía un evento `Timeout`
+/// que fuerza el envío de un nuevo latido.
+#[instrument(name = "heartbeat_to_send_watchdog_timer", skip_all)]
+pub async fn heartbeat_generator_timer(
+    tx_to_heartbeat: mpsc::Sender<Event>,
+    mut cmd_rx: mpsc::Receiver<Event>,
+    cancel: CancellationToken,
+) {
+    info!("iniciando heartbeat_generator_timer");
+    loop {
+        let duration = match cmd_rx.recv().await {
+            Some(Event::InitTimer(d)) => d,
+            Some(Event::StopTimer) => continue,
+            None => break,
+            _ => continue,
+        };
+
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                info!("shutdown recibido heartbeat_generator_timer");
+                break;
+            }
+            _ = sleep(duration) => {
+                if tx_to_heartbeat.send(Event::Timeout).await.is_err() {
+                    error!("no se pudo enviar evento Timeout");
+                }
+            }
+            Some(Event::StopTimer) = cmd_rx.recv() => { }
+        }
+    }
+}
+
+/// Generador de mensajes Heartbeat.
+///
+/// Gestiona la cadencia y el tipo de mensaje de latido (Heartbeat) enviado a los hubs
+/// dependiendo del estado actual (Phase, Normal, SafeMode).
+#[instrument(name = "heartbeat_generator", skip_all)]
+pub async fn heartbeat_generator(
+    tx_to_core: mpsc::Sender<FsmServiceResponse>,
+    tx_to_timer: mpsc::Sender<Event>,
+    mut rx_from_fsm: mpsc::Receiver<Action>,
+    mut cmd_rx: mpsc::Receiver<Event>,
+    app_context: AppContext,
+    cancel: CancellationToken,
+) {
+    info!("iniciando heartbeat_generator");
+    enum HeartbeatState {
+        BalanceMode,
+        Normal,
+        SafeMode,
+        None,
+    }
+
+    let mut beat = HeartbeatState::None;
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                info!("shutdown recibido heartbeat_generator");
+                break;
+            }
+            Some(action) = rx_from_fsm.recv() => {
+                match action {
+                    Action::SendHeartbeatMessagePhase => {
+                        debug!("comenzando envío de Heartbeat para las fases");
+                        beat = HeartbeatState::BalanceMode;
+                        let duration = app_context.quorum.get_time_between_heartbeats_balance_mode();
+                        if tx_to_timer.send(Event::InitTimer(Duration::from_secs(duration))).await.is_err() {
+                            error!("no se pudo enviar evento InitTimer");
+                        }
+                    },
+                    Action::SendHeartbeatMessageNormal => {
+                        debug!("comenzando envío de Heartbeat para estado normal");
+                        beat = HeartbeatState::Normal;
+                        let duration = app_context.quorum.get_time_between_heartbeats_normal();
+                        if tx_to_timer.send(Event::InitTimer(Duration::from_secs(duration))).await.is_err() {
+                            error!("no se pudo enviar evento InitTimer");
+                        }
+                    },
+                    Action::SendHeartbeatMessageSafeMode => {
+                        debug!("comenzando envío de Heartbeat para estado safe_mode");
+                        beat = HeartbeatState::SafeMode;
+                        let duration = app_context.quorum.get_time_between_heartbeats_safe_mode();
+                        if tx_to_timer.send(Event::InitTimer(Duration::from_secs(duration))).await.is_err() {
+                            error!("no se pudo enviar evento InitTimer");
+                        }
+                    },
+                    Action::StopSendHeartbeatMessagePhase => {
+                        debug!("finalizando envío de Heartbeat para las fases");
+                        if tx_to_timer.send(Event::StopTimer).await.is_err() {
+                            error!("no se pudo enviar evento StopTimer");
+                        }
+                    }
+                    Action::StopSendHeartbeatMessageSafeMode => {
+                        debug!("finalizando envío de Heartbeat para estado safe_mode");
+                        if tx_to_timer.send(Event::StopTimer).await.is_err() {
+                            error!("no se pudo enviar evento StopTimer");
+                        }
+                    }
+                    Action::StopSendHeartbeatMessageNormal => {
+                        debug!("finalizando envío de Heartbeat para estado normal");
+                        if tx_to_timer.send(Event::StopTimer).await.is_err() {
+                            error!("no se pudo enviar evento StopTimer");
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            Some(Event::Timeout) = cmd_rx.recv() => {
+                send_heartbeat(&tx_to_core, &app_context).await;
+                let duration = match beat {
+                    HeartbeatState::BalanceMode => Duration::from_secs(app_context.quorum.get_time_between_heartbeats_balance_mode()),
+                    HeartbeatState::Normal => Duration::from_secs(app_context.quorum.get_time_between_heartbeats_normal()),
+                    HeartbeatState::SafeMode => Duration::from_secs(app_context.quorum.get_time_between_heartbeats_safe_mode()),
+                    HeartbeatState::None => continue,
+                };
+                if tx_to_timer.send(Event::InitTimer(duration)).await.is_err() {
+                    error!("no se pudo enviar evento de InitTimer");
+                }
+            }
+        }
+    }
+}
+
+/// Tarea asíncrona que gestiona el envío periódico del mensaje de estado al servidor y a los hub.
+///
+/// # Canal Monitorizado
+/// * `rx_command`: Mensajes de tipo StateGlobal proveniente de `handle_action`.
+///
+#[instrument(name = "edge_state", skip_all)]
+pub async fn edge_state(
+    tx: mpsc::Sender<FsmServiceResponse>,
+    mut rx_command: mpsc::Receiver<StateGlobal>,
+    app_context: AppContext,
+    cancel: CancellationToken,
+) {
+    let mut state: StateGlobal = StateGlobal::Start;
+    let mut ticker = interval(Duration::from_secs(10));
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                info!("shutdown recibido edge_state");
+                break;
+            }
+
+            _ = ticker.tick() => {
+                match state {
+                    StateGlobal::BalanceMode => {
+                        if tx.send(FsmServiceResponse::EdgeState("Balance".to_string())).await.is_err() {
+                            error!("no se pudo enviar mensaje EdgeState periódico");
+                        }
+                        let metadata = build_metadata(&app_context, "all");
+                        let state = StateToHub {
+                            metadata,
+                            state: "balance".to_string(),
+                            balance_epoch: 0,
+                            duration: 0,
+                            frequency: 0,
+                            jitter: 0,
+                        };
+                        if tx.send(FsmServiceResponse::ToHub(HubMessage::StateToHub(state))).await.is_err() {
+                            error!("no se pudo enviar mensaje EdgeState periódico");
+                        }
+                    },
+                    StateGlobal::Normal => {
+                        if tx.send(FsmServiceResponse::EdgeState("Normal".to_string())).await.is_err() {
+                            error!("no se pudo enviar mensaje EdgeState periódico");
+                        }
+                        let metadata = build_metadata(&app_context, "all");
+                        let state = StateToHub {
+                            metadata,
+                            state: "normal".to_string(),
+                            balance_epoch: 0,
+                            duration: 0,
+                            frequency: 0,
+                            jitter: 0,
+                        };
+                        if tx.send(FsmServiceResponse::ToHub(HubMessage::StateToHub(state))).await.is_err() {
+                            error!("no se pudo enviar mensaje EdgeState periódico");
+                        }
+                    }
+                    StateGlobal::SafeMode => {
+                        if tx.send(FsmServiceResponse::EdgeState("SafeMode".to_string())).await.is_err() {
+                            error!("no se pudo enviar mensaje EdgeState periódico");
+                        }
+                        let metadata = build_metadata(&app_context, "all");
+                        let jitter = fastrand::u32(0..=5);
+                        let state = StateToHub {
+                            metadata: metadata.clone(),
+                            state: "safe".to_string(),
+                            balance_epoch: 0,
+                            duration: 0,
+                            frequency: app_context.quorum.get_frequency_safe_mode(),
+                            jitter,
+                        };
+                        if tx.send(FsmServiceResponse::ToHub(HubMessage::StateToHub(state))).await.is_err() {
+                            error!("no se pudo enviar mensaje EdgeState periódico");
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            Some(msg) = rx_command.recv() => {
+                match msg {
+                    StateGlobal::BalanceMode => {
+                        state = StateGlobal::BalanceMode;
+                    },
+                    StateGlobal::Normal => {
+                        state = StateGlobal::Normal;
+                    },
+                    StateGlobal::SafeMode => {
+                        state = StateGlobal::SafeMode;
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 }
 
@@ -724,9 +928,7 @@ async fn on_entry_monitor(
     .await;
 }
 
-async fn on_entry_normal(
-    tx_to_heartbeat: &mpsc::Sender<Action>,
-) {
+async fn on_entry_normal(tx_to_heartbeat: &mpsc::Sender<Action>) {
     debug!("entrando a estado normal");
     if tx_to_heartbeat
         .send(Action::SendHeartbeatMessageNormal)
@@ -755,158 +957,6 @@ async fn on_entry_safe_mode(
         .is_err()
     {
         error!("no se pudo enviar acción SendHeartbeatMessageSafeMode");
-    }
-}
-
-/// Tarea asíncrona que ejecuta la lógica pura de la Máquina de Estados.
-///
-/// Mantiene el estado persistente (`FsmState`) y avanza pasos tras recibir eventos.
-///
-/// * `tx_actions`: Canal para emitir los efectos secundarios que deben ejecutarse.
-/// * `rx_event`: Canal de entrada de eventos (triggers).
-#[instrument(name = "run_fsm", skip_all)]
-pub async fn run_fsm(
-    tx_actions: mpsc::Sender<Vec<Action>>,
-    mut rx_event: mpsc::Receiver<Event>,
-    cancel: CancellationToken,
-) {
-    info!("iniciando tarea fsm");
-    let mut state = FsmState::new();
-
-    handle_transition(state.step(Event::Start), &mut state, &tx_actions).await;
-
-    loop {
-        tokio::select! {
-            _ = cancel.cancelled() => {
-                info!("shutdown recibido run_fsm");
-                break;
-            }
-            Some(event) = rx_event.recv() => {
-                handle_transition(state.step(event), &mut state, &tx_actions).await;
-            }
-        }
-    }
-}
-
-/// Watchdog Timer (Perro guardián) para el envío de Heartbeats.
-///
-/// Si este timer expira sin ser reseteado o detenido, envía un evento `Timeout`
-/// que fuerza el envío de un nuevo latido.
-#[instrument(name = "heartbeat_to_send_watchdog_timer", skip_all)]
-pub async fn heartbeat_generator_timer(
-    tx_to_heartbeat: mpsc::Sender<Event>,
-    mut cmd_rx: mpsc::Receiver<Event>,
-    cancel: CancellationToken,
-) {
-    info!("iniciando heartbeat_generator_timer");
-    loop {
-        let duration = match cmd_rx.recv().await {
-            Some(Event::InitTimer(d)) => d,
-            Some(Event::StopTimer) => continue,
-            None => break,
-            _ => continue,
-        };
-
-        tokio::select! {
-            _ = cancel.cancelled() => {
-                info!("shutdown recibido heartbeat_generator_timer");
-                break;
-            }
-            _ = sleep(duration) => {
-                if tx_to_heartbeat.send(Event::Timeout).await.is_err() {
-                    error!("no se pudo enviar evento Timeout");
-                }
-            }
-            Some(Event::StopTimer) = cmd_rx.recv() => { }
-        }
-    }
-}
-
-/// Generador de mensajes Heartbeat.
-///
-/// Gestiona la cadencia y el tipo de mensaje de latido (Heartbeat) enviado a los hubs
-/// dependiendo del estado actual (Phase, Normal, SafeMode).
-#[instrument(name = "heartbeat_generator", skip_all)]
-pub async fn heartbeat_generator(
-    tx_to_core: mpsc::Sender<FsmServiceResponse>,
-    tx_to_timer: mpsc::Sender<Event>,
-    mut rx_from_fsm: mpsc::Receiver<Action>,
-    mut cmd_rx: mpsc::Receiver<Event>,
-    app_context: AppContext,
-    cancel: CancellationToken,
-) {
-    info!("iniciando heartbeat_generator");
-    enum HeartbeatState {
-        BalanceMode,
-        Normal,
-        SafeMode,
-        None,
-    }
-
-    let mut beat = HeartbeatState::None;
-
-    loop {
-        tokio::select! {
-            _ = cancel.cancelled() => {
-                info!("shutdown recibido heartbeat_generator");
-                break;
-            }
-            Some(action) = rx_from_fsm.recv() => {
-                match action {
-                    Action::SendHeartbeatMessagePhase => {
-                        debug!("comenzando envío de Heartbeat para las fases");
-                        beat = HeartbeatState::BalanceMode;
-                        let duration = app_context.quorum.get_time_between_heartbeats_balance_mode();
-                        if tx_to_timer.send(Event::InitTimer(Duration::from_secs(duration))).await.is_err() {
-                            error!("no se pudo enviar evento InitTimer");
-                        }
-                    },
-                    Action::SendHeartbeatMessageNormal => {
-                        debug!("comenzando envío de Heartbeat para estado normal");
-                        beat = HeartbeatState::Normal;
-                        let duration = app_context.quorum.get_time_between_heartbeats_normal();
-                        if tx_to_timer.send(Event::InitTimer(Duration::from_secs(duration))).await.is_err() {
-                            error!("no se pudo enviar evento InitTimer");
-                        }
-                    },
-                    Action::SendHeartbeatMessageSafeMode => {
-                        debug!("comenzando envío de Heartbeat para estado safe_mode");
-                        beat = HeartbeatState::SafeMode;
-                        let duration = app_context.quorum.get_time_between_heartbeats_safe_mode();
-                        if tx_to_timer.send(Event::InitTimer(Duration::from_secs(duration))).await.is_err() {
-                            error!("no se pudo enviar evento InitTimer");
-                        }
-                    },
-                    Action::StopSendHeartbeatMessagePhase => {
-                        debug!("finalizando envío de Heartbeat para las fases");
-                        if tx_to_timer.send(Event::StopTimer).await.is_err() {
-                            error!("no se pudo enviar evento StopTimer");
-                        }
-
-                    }
-                    Action::StopSendHeartbeatMessageSafeMode => {
-                        debug!("finalizando envío de Heartbeat para estado safe_mode");
-                        if tx_to_timer.send(Event::StopTimer).await.is_err() {
-                            error!("no se pudo enviar evento StopTimer");
-                        }
-                    }
-                    _ => {}
-                }
-            }
-
-            Some(Event::Timeout) = cmd_rx.recv() => {
-                send_heartbeat(&tx_to_core, &app_context).await;
-                let duration = match beat {
-                    HeartbeatState::BalanceMode => Duration::from_secs(app_context.quorum.get_time_between_heartbeats_balance_mode()),
-                    HeartbeatState::Normal => Duration::from_secs(app_context.quorum.get_time_between_heartbeats_normal()),
-                    HeartbeatState::SafeMode => Duration::from_secs(app_context.quorum.get_time_between_heartbeats_safe_mode()),
-                    HeartbeatState::None => continue,
-                };
-                if tx_to_timer.send(Event::InitTimer(duration)).await.is_err() {
-                    error!("no se pudo enviar evento de InitTimer");
-                }
-            }
-        }
     }
 }
 

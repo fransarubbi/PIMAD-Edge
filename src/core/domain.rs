@@ -15,19 +15,19 @@
 //! - **Salidas:** `mpsc::Sender` (El Core envía comandos a través de estos canales).
 //! - **Concurrencia:** Utiliza `tokio::select!` para multiplexar todos los canales de entrada en un único hilo de ejecución (Event Loop).
 
-
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
 use crate::database::domain::{DataServiceCommand, DataServiceResponse};
 use crate::firmware::domain::{FirmwareServiceCommand, FirmwareServiceResponse};
 use crate::fsm::domain::{FsmServiceCommand, FsmServiceResponse};
 use crate::grpc::FromEdge;
-use crate::message::domain::{HubMessage, MessageServiceCommand, MessageServiceResponse, ServerMessage};
+use crate::message::domain::{
+    HubMessage, MessageServiceCommand, MessageServiceResponse, ServerMessage,
+};
 use crate::mqtt::domain::MqttServiceCommand;
 use crate::network::domain::{Batch, NetworkServiceCommand, NetworkServiceResponse};
 use crate::system::domain::InternalEvent;
-
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+use tracing::{error, info};
 
 /// Estructura principal que mantiene los canales de comunicación.
 ///
@@ -50,9 +50,8 @@ pub struct Core {
     core_from_mqtt_service: mpsc::Receiver<InternalEvent>,
     core_to_mqtt_service: mpsc::Sender<MqttServiceCommand>,
     core_from_network_service: mpsc::Receiver<NetworkServiceResponse>,
-    core_to_network_service: mpsc::Sender<NetworkServiceCommand>
+    core_to_network_service: mpsc::Sender<NetworkServiceCommand>,
 }
-
 
 /// Builder para construir la estructura `Core`.
 ///
@@ -80,7 +79,6 @@ pub struct CoreBuilder {
     core_to_network_service: Option<mpsc::Sender<NetworkServiceCommand>>,
 }
 
-
 impl CoreBuilder {
     // --- Métodos Setter ---
     // Cada método consume self y devuelve self para permitir encadenamiento.
@@ -94,7 +92,10 @@ impl CoreBuilder {
         self
     }
 
-    pub fn core_from_firmware_service(mut self, ch: mpsc::Receiver<FirmwareServiceResponse>) -> Self {
+    pub fn core_from_firmware_service(
+        mut self,
+        ch: mpsc::Receiver<FirmwareServiceResponse>,
+    ) -> Self {
         self.core_from_firmware_service = Some(ch);
         self
     }
@@ -168,30 +169,62 @@ impl CoreBuilder {
     /// Retorna un `Err(String)` si falta configurar alguno de los canales.
     pub fn build(self) -> Result<Core, String> {
         Ok(Core {
-            core_from_data_service: self.core_from_data_service.ok_or("Falta: core_from_data_service")?,
-            core_to_data_service: self.core_to_data_service.ok_or("Falta: core_to_data_service")?,
-            core_from_firmware_service: self.core_from_firmware_service.ok_or("Falta: core_from_firmware_service")?,
-            core_to_firmware_service: self.core_to_firmware_service.ok_or("Falta: core_to_firmware_service")?,
-            core_from_fsm_service: self.core_from_fsm_service.ok_or("Falta: core_from_fsm_service")?,
-            core_to_fsm_service: self.core_to_fsm_service.ok_or("Falta: core_to_fsm_service")?,
-            core_from_grpc_service: self.core_from_grpc_service.ok_or("Falta: core_from_grpc_service")?,
-            core_to_grpc_service: self.core_to_grpc_service.ok_or("Falta: core_to_grpc_service")?,
-            core_from_heartbeat_service: self.core_from_heartbeat_service.ok_or("Falta: core_from_heartbeat_service")?,
-            core_to_heartbeat_service: self.core_to_heartbeat_service.ok_or("Falta: core_to_heartbeat_service")?,
-            core_from_message_service: self.core_from_message_service.ok_or("Falta: core_from_message_service")?,
-            core_to_message_service: self.core_to_message_service.ok_or("Falta: core_to_message_service")?,
-            core_from_metrics_service: self.core_from_metrics_service.ok_or("Falta: core_from_metrics_service")?,
-            core_from_mqtt_service: self.core_from_mqtt_service.ok_or("Falta: core_from_mqtt_service")?,
-            core_to_mqtt_service: self.core_to_mqtt_service.ok_or("Falta: core_to_mqtt_service")?,
-            core_from_network_service: self.core_from_network_service.ok_or("Falta: core_from_network_service")?,
-            core_to_network_service: self.core_to_network_service.ok_or("Falta: core_to_network_service")?,
+            core_from_data_service: self
+                .core_from_data_service
+                .ok_or("Falta: core_from_data_service")?,
+            core_to_data_service: self
+                .core_to_data_service
+                .ok_or("Falta: core_to_data_service")?,
+            core_from_firmware_service: self
+                .core_from_firmware_service
+                .ok_or("Falta: core_from_firmware_service")?,
+            core_to_firmware_service: self
+                .core_to_firmware_service
+                .ok_or("Falta: core_to_firmware_service")?,
+            core_from_fsm_service: self
+                .core_from_fsm_service
+                .ok_or("Falta: core_from_fsm_service")?,
+            core_to_fsm_service: self
+                .core_to_fsm_service
+                .ok_or("Falta: core_to_fsm_service")?,
+            core_from_grpc_service: self
+                .core_from_grpc_service
+                .ok_or("Falta: core_from_grpc_service")?,
+            core_to_grpc_service: self
+                .core_to_grpc_service
+                .ok_or("Falta: core_to_grpc_service")?,
+            core_from_heartbeat_service: self
+                .core_from_heartbeat_service
+                .ok_or("Falta: core_from_heartbeat_service")?,
+            core_to_heartbeat_service: self
+                .core_to_heartbeat_service
+                .ok_or("Falta: core_to_heartbeat_service")?,
+            core_from_message_service: self
+                .core_from_message_service
+                .ok_or("Falta: core_from_message_service")?,
+            core_to_message_service: self
+                .core_to_message_service
+                .ok_or("Falta: core_to_message_service")?,
+            core_from_metrics_service: self
+                .core_from_metrics_service
+                .ok_or("Falta: core_from_metrics_service")?,
+            core_from_mqtt_service: self
+                .core_from_mqtt_service
+                .ok_or("Falta: core_from_mqtt_service")?,
+            core_to_mqtt_service: self
+                .core_to_mqtt_service
+                .ok_or("Falta: core_to_mqtt_service")?,
+            core_from_network_service: self
+                .core_from_network_service
+                .ok_or("Falta: core_from_network_service")?,
+            core_to_network_service: self
+                .core_to_network_service
+                .ok_or("Falta: core_to_network_service")?,
         })
     }
 }
 
-
 impl Core {
-
     /// Crea un nuevo `CoreBuilder` inicializado con valores por defecto (None).
     pub fn builder() -> CoreBuilder {
         CoreBuilder::default()
@@ -220,12 +253,21 @@ impl Core {
     /// | **MetricsService** | `ServerMessage` | MessageService | Enviar telemetría al servidor |
     /// | **NetworkService** | `DataCommand` | DataService | CRUD de redes/hubs en base de datos |
     pub async fn run(mut self, shutdown: CancellationToken) {
-
-        if self.core_to_data_service.send(DataServiceCommand::GetTotalOfNetworks).await.is_err() {
+        if self
+            .core_to_data_service
+            .send(DataServiceCommand::GetTotalOfNetworks)
+            .await
+            .is_err()
+        {
             error!("no se pudo enviar comando GetTotalOfNetworks desde Core");
         }
 
-        if self.core_to_message_service.send(MessageServiceCommand::GenerateHelloWorld).await.is_err() {
+        if self
+            .core_to_message_service
+            .send(MessageServiceCommand::GenerateHelloWorld)
+            .await
+            .is_err()
+        {
             error!("no se pudo enviar comando GenerateHelloWorld desde Core");
         }
 
@@ -449,6 +491,19 @@ impl Core {
                     }
                 }
                 Some(response) = self.core_from_mqtt_service.recv() => {
+                    match &response {
+                        InternalEvent::LocalDisconnected => {
+                            if self.core_to_fsm_service.send(FsmServiceCommand::LocalDisconnected).await.is_err() {
+                                error!("no se pudo enviar LocalDisconnect desde Core");
+                            }
+                        }
+                        InternalEvent::LocalConnected => {
+                            if self.core_to_fsm_service.send(FsmServiceCommand::LocalConnected).await.is_err() {
+                                error!("no se pudo enviar LocalConnect desde Core");
+                            }
+                        }
+                        _ => {}
+                    }
                     if self.core_to_message_service.send(MessageServiceCommand::Internal(response)).await.is_err() {
                         error!("no se pudo enviar Internal desde Core");
                     }

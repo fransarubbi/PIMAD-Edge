@@ -14,18 +14,18 @@
 //!     ejecute tareas reales (enviar mensajes MQTT, iniciar timers, escribir en DB).
 //!
 
-
-use std::collections::HashMap;
+use crate::context::domain::AppContext;
+use crate::fsm::logic::{
+    edge_state, handle_events_and_actions, heartbeat_generator, heartbeat_generator_timer, run_fsm,
+};
+use crate::message::domain::HubMessage;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument};
-use crate::context::domain::AppContext;
-use crate::fsm::logic::{edge_state, fsm, heartbeat_generator, heartbeat_generator_timer, run_fsm};
-use crate::message::domain::{HubMessage};
-
 
 pub enum FsmServiceResponse {
     NewEpoch(u32),
@@ -34,22 +34,21 @@ pub enum FsmServiceResponse {
     EdgeState(String),
 }
 
-
 pub enum FsmServiceCommand {
     ErrorEpoch,
     Epoch(u32),
     FromHub(HubMessage),
     CreateRuntime,
     DeleteRuntime,
+    LocalDisconnected,
+    LocalConnected,
 }
-
 
 pub struct FsmService {
     sender: mpsc::Sender<FsmServiceResponse>,
     receiver: mpsc::Receiver<FsmServiceCommand>,
     context: AppContext,
 }
-
 
 struct FsmRuntime {
     handles: Vec<JoinHandle<()>>,
@@ -59,12 +58,12 @@ struct FsmRuntime {
     rx_heartbeat_response: mpsc::Receiver<FsmServiceResponse>,
 }
 
-
-
 impl FsmService {
-    pub fn new(sender: mpsc::Sender<FsmServiceResponse>,
-               receiver: mpsc::Receiver<FsmServiceCommand>,
-               context: AppContext) -> Self {
+    pub fn new(
+        sender: mpsc::Sender<FsmServiceResponse>,
+        receiver: mpsc::Receiver<FsmServiceCommand>,
+        context: AppContext,
+    ) -> Self {
         Self {
             sender,
             receiver,
@@ -73,7 +72,6 @@ impl FsmService {
     }
 
     fn spawn_runtime(&self) -> FsmRuntime {
-
         let token = CancellationToken::new();
         let mut handles = Vec::new();
 
@@ -91,7 +89,7 @@ impl FsmService {
         let child_token = token.child_token();
         let general_tx_to_fsm = tx_to_fsm.clone();
         let general_tx_to_core = tx_to_core.clone();
-        handles.push(tokio::spawn(fsm(
+        handles.push(tokio::spawn(handle_events_and_actions(
             general_tx_to_core,
             general_tx_to_fsm,
             general_tx_to_timer,
@@ -100,7 +98,8 @@ impl FsmService {
             rx_command,
             rx_from_fsm,
             self.context.clone(),
-            child_token)));
+            child_token,
+        )));
 
         let child_token = token.child_token();
         let general_tx_to_core = tx_to_core.clone();
@@ -108,26 +107,26 @@ impl FsmService {
             general_tx_to_core,
             rx_from_fsm_to_edge,
             self.context.clone(),
-            child_token)));
+            child_token,
+        )));
 
         let child_token = token.child_token();
-        handles.push(tokio::spawn(run_fsm(
-            tx_actions,
-            rx_event,
-            child_token)));
+        handles.push(tokio::spawn(run_fsm(tx_actions, rx_event, child_token)));
 
         let child_token = token.child_token();
         let timer_tx_to_fsm = tx_to_fsm.clone();
         handles.push(tokio::spawn(fsm_watchdog_timer(
             timer_tx_to_fsm,
             rx_from_general,
-            child_token)));
+            child_token,
+        )));
 
         let child_token = token.child_token();
         handles.push(tokio::spawn(heartbeat_generator_timer(
             tx_to_heartbeat,
             rx_from_heartbeat,
-            child_token)));
+            child_token,
+        )));
 
         let child_token = token.child_token();
         handles.push(tokio::spawn(heartbeat_generator(
@@ -136,7 +135,8 @@ impl FsmService {
             rx_heartbeat_from_general,
             rx_from_heartbeat_watchdog,
             self.context.clone(),
-            child_token)));
+            child_token,
+        )));
 
         FsmRuntime {
             handles,
@@ -148,7 +148,6 @@ impl FsmService {
     }
 
     pub async fn run(mut self, shutdown: CancellationToken) {
-
         let mut runtime: Option<FsmRuntime> = None;
 
         loop {
@@ -237,8 +236,6 @@ impl FsmService {
     }
 }
 
-
-
 /// Estados Globales de nivel superior.
 ///
 /// Determinan el comportamiento macro del sistema.
@@ -247,14 +244,16 @@ pub enum StateGlobal {
     Start,
     /// **Modo de Balanceo:** Fase crítica de negociación distribuida. El dispositivo
     /// intenta sincronizarse con sus hubs, verificar quórum y establecer su rol.
-    BalanceMode(u32),
+    BalanceMode,
     /// **Operación Normal:** El dispositivo ha completado el balanceo exitosamente y opera en régimen estable.
     Normal,
     /// **Modo Seguro:** Estado de fallo o emergencia. El dispositivo entra aquí tras errores críticos
     /// (DB corrupta, fallo de consenso repetido) para evitar operaciones inseguras.
     SafeMode,
+    /// **Estad Desconectado:** Estado de transición luego de una pérdida de conexión MQTT.
+    /// Cuando se recupere la conexión, se iniciará el PCBPF.
+    Disconnected,
 }
-
 
 /// Sub-estados del modo de balanceo (`StateGlobal::BalanceMode`).
 ///
@@ -268,7 +267,6 @@ pub enum SubStateBalanceMode {
     OutHandshake,
 }
 
-
 /// Sub-estados específicos de la verificación de Quorum.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SubStateQuorum {
@@ -278,7 +276,6 @@ pub enum SubStateQuorum {
     RepeatHandshakeOut,
 }
 
-
 /// Fases operativas dentro del modo de balanceo.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SubStatePhase {
@@ -286,7 +283,6 @@ pub enum SubStatePhase {
     Data,
     Monitor,
 }
-
 
 /// Representación compuesta del estado completo de la FSM.
 ///
@@ -307,7 +303,6 @@ pub struct FsmState {
     phase: Option<SubStatePhase>,
 }
 
-
 /// Resultado de intentar aplicar un evento al estado actual.
 #[derive(Debug)]
 pub enum Transition {
@@ -315,14 +310,12 @@ pub enum Transition {
     Invalid(TransitionInvalid),
 }
 
-
 /// Datos resultantes de una transición exitosa.
 #[derive(Debug)]
 pub struct TransitionValid {
     change_state: FsmState,
     actions: Vec<Action>,
 }
-
 
 impl TransitionValid {
     pub fn get_change_state(&self) -> FsmState {
@@ -333,20 +326,17 @@ impl TransitionValid {
     }
 }
 
-
 /// Datos resultantes de una transición fallida o no permitida.
 #[derive(Debug)]
 pub struct TransitionInvalid {
     invalid: String,
 }
 
-
 impl TransitionInvalid {
     pub fn get_invalid(&self) -> &str {
         &self.invalid
     }
 }
-
 
 /// Acciones o Efectos Secundarios (Side Effects).
 ///
@@ -359,15 +349,16 @@ pub enum Action {
     SendHeartbeatMessageNormal,
     StopSendHeartbeatMessagePhase,
     StopSendHeartbeatMessageSafeMode,
+    StopSendHeartbeatMessageNormal,
     OnEntryBalance(SubStateBalanceMode),
     OnEntryQuorum(SubStateQuorum),
     OnEntryPhase(SubStatePhase),
     OnEntryNormal,
     OnEntrySafeMode,
+    OnEntryDisconnected,
     StopTimer,
     CalculateQuorum,
 }
-
 
 /// Eventos que alimentan la FSM.
 ///
@@ -386,8 +377,9 @@ pub enum Event {
     InitTimer(Duration),
     StopTimer,
     NewMessageHandshake,
+    LocalDisconnected,
+    LocalConnected,
 }
-
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum StateOfSession {
@@ -402,14 +394,12 @@ pub enum StateOfSession {
     SafeMode,
 }
 
-
 pub struct UpdateSession {
     empty_hash: HashMap<String, bool>,
     handshake_hash: HashMap<String, u32>,
     state: StateOfSession,
     total_attempts: f64,
 }
-
 
 impl UpdateSession {
     pub fn new() -> Self {
@@ -457,15 +447,18 @@ impl UpdateSession {
         &self.state
     }
 
-    pub fn get_total_handshake(&self) -> u64 { self.handshake_hash.len() as u64 }
+    pub fn get_total_handshake(&self) -> u64 {
+        self.handshake_hash.len() as u64
+    }
 
     pub fn get_total_attempts(&self) -> f64 {
         self.total_attempts
     }
 
-    pub fn get_total_empty(&self) -> u64 { self.empty_hash.len() as u64 }
+    pub fn get_total_empty(&self) -> u64 {
+        self.empty_hash.len() as u64
+    }
 }
-
 
 impl FsmState {
     /// Crea una nueva instancia de la FSM en el estado inicial.
@@ -482,14 +475,10 @@ impl FsmState {
     fn step_inner(&self, event: Event) -> Transition {
         match self.global {
             StateGlobal::Start => self.step_start(event),
-            StateGlobal::BalanceMode(_) => self.step_balance_mode(event),
+            StateGlobal::BalanceMode => self.step_balance_mode(event),
             StateGlobal::SafeMode => self.step_safe_mode(event),
-            _ => {
-                let invalid = TransitionInvalid {
-                    invalid: "No hay mas transiciones para ejecutar, una vez dentro de Normal, no se sale nunca".to_string(),
-                };
-                Transition::Invalid(invalid)
-            }
+            StateGlobal::Normal => self.step_normal(event),
+            StateGlobal::Disconnected => self.step_disconnected(event),
         }
     }
 
@@ -497,7 +486,7 @@ impl FsmState {
         match (&self.global, event) {
             (StateGlobal::Start, Event::Start) => {
                 let mut next_fsm = self.clone();
-                next_fsm.global = StateGlobal::BalanceMode(0);
+                next_fsm.global = StateGlobal::BalanceMode;
                 next_fsm.balance = Some(SubStateBalanceMode::InitBalanceMode);
 
                 let valid = TransitionValid {
@@ -511,147 +500,222 @@ impl FsmState {
                     invalid: "Invalid".to_string(),
                 };
                 Transition::Invalid(invalid)
-            },
+            }
         }
     }
 
     /// Maneja transiciones cuando el estado global es `BalanceMode`.
     fn step_balance_mode(&self, event: Event) -> Transition {
         match (&self.balance, &event) {
+            (_, Event::LocalDisconnected) => {
+                let mut next_fsm = self.clone();
+                next_fsm.balance = None;
+                next_fsm.phase = None;
+                next_fsm.quorum = None;
+                next_fsm.global = StateGlobal::Disconnected;
+                let valid = TransitionValid {
+                    change_state: next_fsm,
+                    actions: vec![Action::StopSendHeartbeatMessagePhase, Action::StopTimer],
+                };
+                Transition::Valid(valid)
+            }
             (Some(SubStateBalanceMode::InitBalanceMode), Event::BalanceEpochOk) => {
                 let next_fsm = self.clone();
                 state_init_balance_mode_event_balance_epoch(next_fsm)
-            },
+            }
             (Some(SubStateBalanceMode::InitBalanceMode), Event::BalanceEpochNotOk) => {
                 let next_fsm = self.clone();
                 state_init_balance_mode_event_balance_epoch_not_ok(next_fsm)
-            },
+            }
             (Some(SubStateBalanceMode::InHandshake), Event::Timeout) => {
                 let next_fsm = self.clone();
                 state_in_handshake_event_timeout(next_fsm)
-            },
+            }
             (Some(SubStateBalanceMode::InHandshake), Event::NewMessageHandshake) => {
                 let next_fsm = self.clone();
                 new_message_handshake(next_fsm)
-            },
+            }
             (Some(SubStateBalanceMode::InHandshake), Event::ApproveQuorum) => {
                 let next_fsm = self.clone();
                 state_in_handshake_event_approve(next_fsm)
-            },
+            }
             (Some(SubStateBalanceMode::InHandshake), Event::NotApproveQuorum) => {
-                Transition::Valid(TransitionValid { change_state: self.clone(), actions: vec![] })
-            },
-            (Some(SubStateBalanceMode::Quorum), _ ) => {
-                match (&self.quorum, event) {
-                    (Some(SubStateQuorum::CheckQuorumIn), Event::NotApproveQuorum) => {
-                        let next_fsm = self.clone();
-                        state_check_quorum_in_event_not_approve(next_fsm)
-                    },
-                    (Some(SubStateQuorum::CheckQuorumIn), Event::ApproveQuorum) => {
-                        let next_fsm = self.clone();
-                        state_check_quorum_in_event_approve_quorum(next_fsm)
-                    },
-                    (Some(SubStateQuorum::CheckQuorumIn), Event::NotApproveNotAttempts) => {
-                        let next_fsm = self.clone();
-                        state_check_quorum_event_not_and_not(next_fsm)
-                    },
-                    (Some(SubStateQuorum::CheckQuorumOut), Event::NotApproveQuorum) => {
-                        let next_fsm = self.clone();
-                        state_check_quorum_out_event_not_approve(next_fsm)
-                    },
-                    (Some(SubStateQuorum::CheckQuorumOut), Event::ApproveQuorum) => {
-                        let next_fsm = self.clone();
-                        state_check_quorum_out_event_approve_quorum(next_fsm)
-                    },
-                    (Some(SubStateQuorum::CheckQuorumOut), Event::NotApproveNotAttempts) => {
-                        let next_fsm = self.clone();
-                        state_check_quorum_event_not_and_not(next_fsm)
-                    },
-                    (Some(SubStateQuorum::RepeatHandshakeIn), Event::Timeout) => {
-                        let next_fsm = self.clone();
-                        state_repeat_handshake_in(next_fsm)
-                    },
-                    (Some(SubStateQuorum::RepeatHandshakeIn), Event::NewMessageHandshake) => {
-                        let next_fsm = self.clone();
-                        new_message_handshake(next_fsm)
-                    },
-                    (Some(SubStateQuorum::RepeatHandshakeIn), Event::ApproveQuorum) => {
-                        let next_fsm = self.clone();
-                        state_repeat_in_handshake_event_approve(next_fsm)
-                    },
-                    (Some(SubStateQuorum::RepeatHandshakeIn), Event::NotApproveQuorum) => {
-                        Transition::Valid(TransitionValid { change_state: self.clone(), actions: vec![] })
-                    },
-                    (Some(SubStateQuorum::RepeatHandshakeOut), Event::Timeout) => {
-                        let next_fsm = self.clone();
-                        state_repeat_handshake_out(next_fsm)
-                    },
-                    (Some(SubStateQuorum::RepeatHandshakeOut), Event::NewMessageHandshake) => {
-                        let next_fsm = self.clone();
-                        new_message_handshake(next_fsm)
-                    },
-                    (Some(SubStateQuorum::RepeatHandshakeOut), Event::ApproveQuorum) => {
-                        let next_fsm = self.clone();
-                        state_repeat_out_handshake_event_approve(next_fsm)
-                    },
-                    (Some(SubStateQuorum::RepeatHandshakeOut), Event::NotApproveQuorum) => {
-                        Transition::Valid(TransitionValid { change_state: self.clone(), actions: vec![] })
-                    },
-                    _ => invalid()
+                Transition::Valid(TransitionValid {
+                    change_state: self.clone(),
+                    actions: vec![],
+                })
+            }
+            (Some(SubStateBalanceMode::Quorum), _) => match (&self.quorum, event) {
+                (Some(SubStateQuorum::CheckQuorumIn), Event::NotApproveQuorum) => {
+                    let next_fsm = self.clone();
+                    state_check_quorum_in_event_not_approve(next_fsm)
                 }
-            },
-            (Some(SubStateBalanceMode::Phase), _ ) => {
-                match (&self.phase, &event) {
-                    (Some(SubStatePhase::Alert), Event::Timeout | Event::QuorumPhase) => {
-                        let next_fsm = self.clone();
-                        state_alert_event_timeout_or_quorum(next_fsm)
-                    },
-                    (Some(SubStatePhase::Data), Event::Timeout | Event::QuorumPhase) => {
-                        let next_fsm = self.clone();
-                        state_data_event_timeout_or_quorum(next_fsm)
-                    },
-                    (Some(SubStatePhase::Monitor), Event::Timeout | Event::QuorumPhase) => {
-                        let next_fsm = self.clone();
-                        state_monitor_event_timeout_or_quorum(next_fsm)
-                    },
-                    _ => invalid()
+                (Some(SubStateQuorum::CheckQuorumIn), Event::ApproveQuorum) => {
+                    let next_fsm = self.clone();
+                    state_check_quorum_in_event_approve_quorum(next_fsm)
                 }
+                (Some(SubStateQuorum::CheckQuorumIn), Event::NotApproveNotAttempts) => {
+                    let next_fsm = self.clone();
+                    state_check_quorum_event_not_and_not(next_fsm)
+                }
+                (Some(SubStateQuorum::CheckQuorumOut), Event::NotApproveQuorum) => {
+                    let next_fsm = self.clone();
+                    state_check_quorum_out_event_not_approve(next_fsm)
+                }
+                (Some(SubStateQuorum::CheckQuorumOut), Event::ApproveQuorum) => {
+                    let next_fsm = self.clone();
+                    state_check_quorum_out_event_approve_quorum(next_fsm)
+                }
+                (Some(SubStateQuorum::CheckQuorumOut), Event::NotApproveNotAttempts) => {
+                    let next_fsm = self.clone();
+                    state_check_quorum_event_not_and_not(next_fsm)
+                }
+                (Some(SubStateQuorum::RepeatHandshakeIn), Event::Timeout) => {
+                    let next_fsm = self.clone();
+                    state_repeat_handshake_in(next_fsm)
+                }
+                (Some(SubStateQuorum::RepeatHandshakeIn), Event::NewMessageHandshake) => {
+                    let next_fsm = self.clone();
+                    new_message_handshake(next_fsm)
+                }
+                (Some(SubStateQuorum::RepeatHandshakeIn), Event::ApproveQuorum) => {
+                    let next_fsm = self.clone();
+                    state_repeat_in_handshake_event_approve(next_fsm)
+                }
+                (Some(SubStateQuorum::RepeatHandshakeIn), Event::NotApproveQuorum) => {
+                    Transition::Valid(TransitionValid {
+                        change_state: self.clone(),
+                        actions: vec![],
+                    })
+                }
+                (Some(SubStateQuorum::RepeatHandshakeOut), Event::Timeout) => {
+                    let next_fsm = self.clone();
+                    state_repeat_handshake_out(next_fsm)
+                }
+                (Some(SubStateQuorum::RepeatHandshakeOut), Event::NewMessageHandshake) => {
+                    let next_fsm = self.clone();
+                    new_message_handshake(next_fsm)
+                }
+                (Some(SubStateQuorum::RepeatHandshakeOut), Event::ApproveQuorum) => {
+                    let next_fsm = self.clone();
+                    state_repeat_out_handshake_event_approve(next_fsm)
+                }
+                (Some(SubStateQuorum::RepeatHandshakeOut), Event::NotApproveQuorum) => {
+                    Transition::Valid(TransitionValid {
+                        change_state: self.clone(),
+                        actions: vec![],
+                    })
+                }
+                _ => invalid(),
+            },
+            (Some(SubStateBalanceMode::Phase), _) => match (&self.phase, &event) {
+                (Some(SubStatePhase::Alert), Event::Timeout | Event::QuorumPhase) => {
+                    let next_fsm = self.clone();
+                    state_alert_event_timeout_or_quorum(next_fsm)
+                }
+                (Some(SubStatePhase::Data), Event::Timeout | Event::QuorumPhase) => {
+                    let next_fsm = self.clone();
+                    state_data_event_timeout_or_quorum(next_fsm)
+                }
+                (Some(SubStatePhase::Monitor), Event::Timeout | Event::QuorumPhase) => {
+                    let next_fsm = self.clone();
+                    state_monitor_event_timeout_or_quorum(next_fsm)
+                }
+                _ => invalid(),
             },
             (Some(SubStateBalanceMode::OutHandshake), Event::Timeout) => {
                 let next_fsm = self.clone();
                 state_out_handshake_event_timeout(next_fsm)
-            },
+            }
             (Some(SubStateBalanceMode::OutHandshake), Event::ApproveQuorum) => {
                 let next_fsm = self.clone();
                 state_out_handshake_event_approve(next_fsm)
-            },
+            }
             (Some(SubStateBalanceMode::OutHandshake), Event::NotApproveQuorum) => {
-                Transition::Valid(TransitionValid { change_state: self.clone(), actions: vec![] })
-            },
+                Transition::Valid(TransitionValid {
+                    change_state: self.clone(),
+                    actions: vec![],
+                })
+            }
             (Some(SubStateBalanceMode::OutHandshake), Event::NewMessageHandshake) => {
                 let next_fsm = self.clone();
                 new_message_handshake(next_fsm)
-            },
-            _ => invalid()
+            }
+            _ => invalid(),
+        }
+    }
+
+    /// Maneja transiciones cuando el estado global es `Normal`.
+    fn step_normal(&self, event: Event) -> Transition {
+        match event {
+            Event::LocalDisconnected => {
+                let mut next_fsm = self.clone();
+                next_fsm.global = StateGlobal::Disconnected;
+                let valid = TransitionValid {
+                    change_state: next_fsm,
+                    actions: vec![Action::StopSendHeartbeatMessageNormal],
+                };
+                return Transition::Valid(valid);
+            }
+            _ => {
+                let invalid = TransitionInvalid {
+                    invalid: "Transición inválida".to_string(),
+                };
+                Transition::Invalid(invalid)
+            }
+        }
+    }
+
+    /// Maneja transiciones cuando el estado global es `Disconnect`.
+    fn step_disconnected(&self, event: Event) -> Transition {
+        match event {
+            Event::LocalConnected => {
+                let mut next_fsm = self.clone();
+                next_fsm.global = StateGlobal::BalanceMode;
+                next_fsm.balance = Some(SubStateBalanceMode::InitBalanceMode);
+                let valid = TransitionValid {
+                    change_state: next_fsm,
+                    actions: vec![],
+                };
+                return Transition::Valid(valid);
+            }
+            _ => {
+                let invalid = TransitionInvalid {
+                    invalid: "Transición inválida".to_string(),
+                };
+                Transition::Invalid(invalid)
+            }
         }
     }
 
     /// Maneja transiciones cuando el estado global es `SafeMode`.
     fn step_safe_mode(&self, event: Event) -> Transition {
-        if event == Event::Timeout || event == Event::QuorumSafeMode {
-            let mut next_fsm = self.clone();
-            next_fsm.global = StateGlobal::Normal;
-            let valid = TransitionValid {
-                change_state: next_fsm,
-                actions: vec![Action::StopSendHeartbeatMessageSafeMode],
-            };
-            return Transition::Valid(valid)
+        match event {
+            Event::LocalDisconnected => {
+                let mut next_fsm = self.clone();
+                next_fsm.global = StateGlobal::Disconnected;
+                let valid = TransitionValid {
+                    change_state: next_fsm,
+                    actions: vec![Action::StopSendHeartbeatMessageSafeMode],
+                };
+                return Transition::Valid(valid);
+            }
+            Event::Timeout | Event::QuorumSafeMode => {
+                let mut next_fsm = self.clone();
+                next_fsm.global = StateGlobal::Normal;
+                let valid = TransitionValid {
+                    change_state: next_fsm,
+                    actions: vec![Action::StopSendHeartbeatMessageSafeMode],
+                };
+                return Transition::Valid(valid);
+            }
+            _ => {
+                let invalid = TransitionInvalid {
+                    invalid: "Transición inválida".to_string(),
+                };
+                Transition::Invalid(invalid)
+            }
         }
-
-        let invalid = TransitionInvalid {
-            invalid: "Transición inválida".to_string(),
-        };
-        Transition::Invalid(invalid)
     }
 
     /// Función principal de transición (API Pública).
@@ -674,8 +738,6 @@ impl FsmState {
     }
 }
 
-
-
 // --- Funciones auxiliares de transición ---
 // Cada una define un cambio atómico de estado.
 
@@ -687,7 +749,6 @@ fn invalid() -> Transition {
     Transition::Invalid(invalid)
 }
 
-
 /// Transición: InitBalanceMode -> InHandshake.
 fn state_init_balance_mode_event_balance_epoch(mut next_fsm: FsmState) -> Transition {
     next_fsm.balance = Some(SubStateBalanceMode::InHandshake);
@@ -698,7 +759,6 @@ fn state_init_balance_mode_event_balance_epoch(mut next_fsm: FsmState) -> Transi
     };
     Transition::Valid(valid)
 }
-
 
 /// Transición: InitBalanceMode -> SafeMode.
 fn state_init_balance_mode_event_balance_epoch_not_ok(mut next_fsm: FsmState) -> Transition {
@@ -712,7 +772,6 @@ fn state_init_balance_mode_event_balance_epoch_not_ok(mut next_fsm: FsmState) ->
     Transition::Valid(valid)
 }
 
-
 /// Transición: InHandshake -> Quorum (CheckQuorumIn).
 fn state_in_handshake_event_timeout(mut next_fsm: FsmState) -> Transition {
     next_fsm.balance = Some(SubStateBalanceMode::Quorum);
@@ -725,16 +784,13 @@ fn state_in_handshake_event_timeout(mut next_fsm: FsmState) -> Transition {
     Transition::Valid(valid)
 }
 
-
 fn new_message_handshake(next_fsm: FsmState) -> Transition {
-
     let valid = TransitionValid {
         change_state: next_fsm,
         actions: vec![Action::CalculateQuorum],
     };
     Transition::Valid(valid)
 }
-
 
 fn state_repeat_in_handshake_event_approve(mut next_fsm: FsmState) -> Transition {
     next_fsm.balance = Some(SubStateBalanceMode::Phase);
@@ -748,7 +804,6 @@ fn state_repeat_in_handshake_event_approve(mut next_fsm: FsmState) -> Transition
     Transition::Valid(valid)
 }
 
-
 fn state_repeat_out_handshake_event_approve(mut next_fsm: FsmState) -> Transition {
     next_fsm.balance = None;
     next_fsm.quorum = None;
@@ -760,7 +815,6 @@ fn state_repeat_out_handshake_event_approve(mut next_fsm: FsmState) -> Transitio
     };
     Transition::Valid(valid)
 }
-
 
 fn state_in_handshake_event_approve(mut next_fsm: FsmState) -> Transition {
     next_fsm.balance = Some(SubStateBalanceMode::Phase);
@@ -774,7 +828,6 @@ fn state_in_handshake_event_approve(mut next_fsm: FsmState) -> Transition {
     Transition::Valid(valid)
 }
 
-
 /// Transición: CheckQuorumIn -> RepeatHandshakeIn (No Quorum).
 fn state_check_quorum_in_event_not_approve(mut next_fsm: FsmState) -> Transition {
     next_fsm.quorum = Some(SubStateQuorum::RepeatHandshakeIn);
@@ -786,7 +839,6 @@ fn state_check_quorum_in_event_not_approve(mut next_fsm: FsmState) -> Transition
     Transition::Valid(valid)
 }
 
-
 /// Transición: CheckQuorumOut -> RepeatHandshakeOut (No Quorum).
 fn state_check_quorum_out_event_not_approve(mut next_fsm: FsmState) -> Transition {
     next_fsm.quorum = Some(SubStateQuorum::RepeatHandshakeOut);
@@ -797,7 +849,6 @@ fn state_check_quorum_out_event_not_approve(mut next_fsm: FsmState) -> Transitio
     };
     Transition::Valid(valid)
 }
-
 
 /// Transición: CheckQuorumIn -> Alert Phase (Approve).
 fn state_check_quorum_in_event_approve_quorum(mut next_fsm: FsmState) -> Transition {
@@ -812,7 +863,6 @@ fn state_check_quorum_in_event_approve_quorum(mut next_fsm: FsmState) -> Transit
     Transition::Valid(valid)
 }
 
-
 /// Transición: CheckQuorumOut -> Normal (Approve).
 fn state_check_quorum_out_event_approve_quorum(mut next_fsm: FsmState) -> Transition {
     next_fsm.balance = None;
@@ -825,7 +875,6 @@ fn state_check_quorum_out_event_approve_quorum(mut next_fsm: FsmState) -> Transi
     };
     Transition::Valid(valid)
 }
-
 
 /// Transición: CheckQuorum -> SafeMode (No Quorum & No Attempts left).
 fn state_check_quorum_event_not_and_not(mut next_fsm: FsmState) -> Transition {
@@ -840,7 +889,6 @@ fn state_check_quorum_event_not_and_not(mut next_fsm: FsmState) -> Transition {
     Transition::Valid(valid)
 }
 
-
 /// Transición: RepeatHandshakeIn -> CheckQuorumIn.
 fn state_repeat_handshake_in(mut next_fsm: FsmState) -> Transition {
     next_fsm.quorum = Some(SubStateQuorum::CheckQuorumIn);
@@ -851,7 +899,6 @@ fn state_repeat_handshake_in(mut next_fsm: FsmState) -> Transition {
     };
     Transition::Valid(valid)
 }
-
 
 /// Transición: RepeatHandshakeOut -> CheckQuorumOut.
 fn state_repeat_handshake_out(mut next_fsm: FsmState) -> Transition {
@@ -864,7 +911,6 @@ fn state_repeat_handshake_out(mut next_fsm: FsmState) -> Transition {
     Transition::Valid(valid)
 }
 
-
 /// Transición: Alert -> Data.
 fn state_alert_event_timeout_or_quorum(mut next_fsm: FsmState) -> Transition {
     next_fsm.phase = Some(SubStatePhase::Data);
@@ -876,7 +922,6 @@ fn state_alert_event_timeout_or_quorum(mut next_fsm: FsmState) -> Transition {
     Transition::Valid(valid)
 }
 
-
 /// Transición: Data -> Monitor.
 fn state_data_event_timeout_or_quorum(mut next_fsm: FsmState) -> Transition {
     next_fsm.phase = Some(SubStatePhase::Monitor);
@@ -887,7 +932,6 @@ fn state_data_event_timeout_or_quorum(mut next_fsm: FsmState) -> Transition {
     };
     Transition::Valid(valid)
 }
-
 
 /// Transición: Monitor -> OutHandshake.
 fn state_monitor_event_timeout_or_quorum(mut next_fsm: FsmState) -> Transition {
@@ -901,7 +945,6 @@ fn state_monitor_event_timeout_or_quorum(mut next_fsm: FsmState) -> Transition {
     Transition::Valid(valid)
 }
 
-
 /// Transición: OutHandshake -> CheckQuorumOut.
 fn state_out_handshake_event_timeout(mut next_fsm: FsmState) -> Transition {
     next_fsm.balance = Some(SubStateBalanceMode::Quorum);
@@ -914,7 +957,6 @@ fn state_out_handshake_event_timeout(mut next_fsm: FsmState) -> Transition {
     Transition::Valid(valid)
 }
 
-
 fn state_out_handshake_event_approve(mut next_fsm: FsmState) -> Transition {
     next_fsm.balance = None;
     next_fsm.quorum = None;
@@ -926,7 +968,6 @@ fn state_out_handshake_event_approve(mut next_fsm: FsmState) -> Transition {
     };
     Transition::Valid(valid)
 }
-
 
 /// Calcula las acciones de entrada (`OnEntry...`) detectando cambios de estado.
 ///
@@ -955,6 +996,10 @@ fn compute_on_entry(old: &FsmState, new: &FsmState) -> Vec<Action> {
         actions.push(Action::OnEntrySafeMode);
     }
 
+    if old.global != new.global && new.global == StateGlobal::Disconnected {
+        actions.push(Action::OnEntryDisconnected);
+    }
+
     if old.phase != new.phase {
         if let Some(s) = &new.phase {
             actions.push(Action::OnEntryPhase(s.clone()));
@@ -964,20 +1009,21 @@ fn compute_on_entry(old: &FsmState, new: &FsmState) -> Vec<Action> {
     actions
 }
 
-
 /// Tarea asíncrona dedicada al temporizador de seguridad (Watchdog).
 ///
 /// Implementa un patrón "Dead Man's Switch". Espera un comando `InitTimer`.
 /// Si el tiempo expira antes de recibir `StopTimer`, envía un evento `Timeout` a la FSM.
 #[instrument(name = "fsm_watchdog_timer", skip_all)]
-pub async fn fsm_watchdog_timer(tx_to_fsm: mpsc::Sender<Event>,
-                                mut cmd_rx: mpsc::Receiver<Event>,
-                                cancel: CancellationToken) {
+pub async fn fsm_watchdog_timer(
+    tx_to_fsm: mpsc::Sender<Event>,
+    mut cmd_rx: mpsc::Receiver<Event>,
+    cancel: CancellationToken,
+) {
     loop {
         let duration = match cmd_rx.recv().await {
             Some(Event::InitTimer(d)) => d,
             Some(Event::StopTimer) => continue, // Si ya estaba parado, ignorar
-            None => break, // Canal cerrado, terminar tarea
+            None => break,                      // Canal cerrado, terminar tarea
             _ => continue,
         };
 

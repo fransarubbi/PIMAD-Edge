@@ -14,279 +14,12 @@
 //!     ejecute tareas reales (enviar mensajes MQTT, iniciar timers, escribir en DB).
 //!
 
-use crate::context::domain::AppContext;
-use crate::database::domain::DataHandle;
-use crate::fsm::logic::{
-    edge_state, handle_events_and_actions, heartbeat_generator, heartbeat_generator_timer, run_fsm,
-};
-use crate::message::{
-    domain::{EmptyQueue, EmptyQueueSafeMode, HandshakeFromHub},
-    logic::MessageHandle,
-};
-use crate::system::domain::InternalEvent;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tokio::sync::{mpsc, oneshot};
-use tokio::task::JoinHandle;
+use tokio::sync::mpsc;
 use tokio::time::{Duration, sleep};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, instrument};
-
-#[derive(Clone)]
-pub struct FsmHandle {
-    tx: mpsc::Sender<InternalFsmCommand>,
-}
-
-impl FsmHandle {
-    pub async fn handshake(&self, data: HandshakeFromHub) {
-        let cmd = InternalFsmCommand::Handshake { data };
-        let _ = self.tx.send(cmd).await;
-    }
-    pub async fn queue(&self, data: EmptyQueue) {
-        let cmd = InternalFsmCommand::Queue { data };
-        let _ = self.tx.send(cmd).await;
-    }
-    pub async fn queue_safe(&self, data: EmptyQueueSafeMode) {
-        let cmd = InternalFsmCommand::QueueSafe { data };
-        let _ = self.tx.send(cmd).await;
-    }
-    pub async fn connection_event(&self, data: InternalEvent) {
-        let cmd = InternalFsmCommand::ConnectionEvent { data };
-        let _ = self.tx.send(cmd).await;
-    }
-    pub async fn create_runtime(&self) -> bool {
-        let (response_tx, response_rx) = oneshot::channel();
-        let cmd = InternalFsmCommand::CreateRuntime {
-            respond_to: response_tx,
-        };
-        if self.tx.send(cmd).await.is_err() {
-            return false;
-        }
-        match response_rx.await {
-            Ok(_) => true,
-            Err(_) => false,
-        }
-    }
-    pub async fn delete_runtime(&self) -> bool {
-        let (response_tx, response_rx) = oneshot::channel();
-        let cmd = InternalFsmCommand::DeleteRuntime {
-            respond_to: response_tx,
-        };
-        if self.tx.send(cmd).await.is_err() {
-            return false;
-        }
-        match response_rx.await {
-            Ok(_) => true,
-            Err(_) => false,
-        }
-    }
-}
-
-enum InternalFsmCommand {
-    Handshake { data: HandshakeFromHub },
-    Queue { data: EmptyQueue },
-    QueueSafe { data: EmptyQueueSafeMode },
-    ConnectionEvent { data: InternalEvent },
-    CreateRuntime { respond_to: oneshot::Sender<bool> },
-    DeleteRuntime { respond_to: oneshot::Sender<bool> },
-}
-
-pub struct FsmService {
-    rx: mpsc::Receiver<InternalFsmCommand>,
-    context: AppContext,
-    message_handle: MessageHandle,
-    db_handle: DataHandle,
-}
-
-struct FsmRuntime {
-    handles: Vec<JoinHandle<()>>,
-    cancel_token: CancellationToken,
-    tx_command: mpsc::Sender<FsmServiceCommand>,
-    rx_response: mpsc::Receiver<FsmServiceResponse>,
-    rx_heartbeat_response: mpsc::Receiver<FsmServiceResponse>,
-}
-
-impl FsmService {
-    pub fn new(
-        context: AppContext,
-        message_handle: MessageHandle,
-        db_handle: DataHandle,
-    ) -> (Self, FsmHandle) {
-        let (tx, rx) = mpsc::channel(10);
-        let service = Self {
-            rx,
-            context,
-            message_handle,
-            db_handle,
-        };
-        let handle = FsmHandle { tx };
-        (service, handle)
-    }
-
-    fn spawn_runtime(&self) -> FsmRuntime {
-        let token = CancellationToken::new();
-        let mut handles = Vec::new();
-
-        let (tx_command, rx_command) = mpsc::channel::<FsmServiceCommand>(50);
-        let (tx_to_core, rx_response) = mpsc::channel::<FsmServiceResponse>(50);
-        let (tx_to_edge_state, rx_from_fsm_to_edge) = mpsc::channel::<StateGlobal>(50);
-        let (tx_to_fsm, rx_event) = mpsc::channel::<Event>(50);
-        let (general_tx_to_timer, rx_from_general) = mpsc::channel::<Event>(50);
-        let (general_tx_to_heartbeat, rx_heartbeat_from_general) = mpsc::channel::<Action>(50);
-        let (tx_actions, rx_from_fsm) = mpsc::channel::<Vec<Action>>(50);
-        let (tx_to_heartbeat, rx_from_heartbeat_watchdog) = mpsc::channel::<Event>(50);
-        let (heartbeat_tx_to_timer, rx_from_heartbeat) = mpsc::channel::<Event>(50);
-        let (heartbeat_tx_to_core, rx_heartbeat_response) = mpsc::channel::<FsmServiceResponse>(50);
-
-        let child_token = token.child_token();
-        let general_tx_to_fsm = tx_to_fsm.clone();
-        let general_tx_to_core = tx_to_core.clone();
-        handles.push(tokio::spawn(handle_events_and_actions(
-            general_tx_to_core,
-            general_tx_to_fsm,
-            general_tx_to_timer,
-            general_tx_to_heartbeat,
-            tx_to_edge_state,
-            rx_command,
-            rx_from_fsm,
-            self.context.clone(),
-            child_token,
-        )));
-
-        let child_token = token.child_token();
-        let general_tx_to_core = tx_to_core.clone();
-        handles.push(tokio::spawn(edge_state(
-            general_tx_to_core,
-            rx_from_fsm_to_edge,
-            self.context.clone(),
-            child_token,
-        )));
-
-        let child_token = token.child_token();
-        handles.push(tokio::spawn(run_fsm(tx_actions, rx_event, child_token)));
-
-        let child_token = token.child_token();
-        let timer_tx_to_fsm = tx_to_fsm.clone();
-        handles.push(tokio::spawn(fsm_watchdog_timer(
-            timer_tx_to_fsm,
-            rx_from_general,
-            child_token,
-        )));
-
-        let child_token = token.child_token();
-        handles.push(tokio::spawn(heartbeat_generator_timer(
-            tx_to_heartbeat,
-            rx_from_heartbeat,
-            child_token,
-        )));
-
-        let child_token = token.child_token();
-        handles.push(tokio::spawn(heartbeat_generator(
-            heartbeat_tx_to_core,
-            heartbeat_tx_to_timer,
-            rx_heartbeat_from_general,
-            rx_from_heartbeat_watchdog,
-            self.context.clone(),
-            child_token,
-        )));
-
-        FsmRuntime {
-            handles,
-            cancel_token: token,
-            tx_command,
-            rx_response,
-            rx_heartbeat_response,
-        }
-    }
-
-    pub async fn run(mut self, shutdown: CancellationToken) {
-        let mut runtime: Option<FsmRuntime> = None;
-
-        loop {
-            match runtime {
-                Some(ref mut rt) => {
-                    tokio::select! {
-                        _ = shutdown.cancelled() => {
-                            info!("shutdown recibido FsmService");
-                            if let Some(rt) = runtime.take() {
-                                rt.cancel_token.cancel();
-                                for h in rt.handles {
-                                    let _ = tokio::time::timeout(Duration::from_secs(2), h).await;
-                                }
-                            }
-                            break;
-                        }
-
-                        Some(cmd) = self.receiver.recv() => {
-                            match cmd {
-                                FsmServiceCommand::Epoch(epoch) => {
-                                    if rt.tx_command.send(FsmServiceCommand::Epoch(epoch)).await.is_err() {
-                                        error!("no se pudo enviar Epoch a fsm");
-                                    }
-                                },
-                                FsmServiceCommand::ErrorEpoch => {
-                                    if rt.tx_command.send(FsmServiceCommand::ErrorEpoch).await.is_err() {
-                                        error!("no se pudo enviar ErrorEpoch a fsm");
-                                    }
-                                },
-                                FsmServiceCommand::FromHub(hub_message) => {
-                                    if rt.tx_command.send(FsmServiceCommand::FromHub(hub_message)).await.is_err() {
-                                        error!("no se pudo enviar FromHub a fsm");
-                                    }
-                                },
-                                FsmServiceCommand::DeleteRuntime => {
-                                    if let Some(rt) = runtime.take() {
-                                        rt.cancel_token.cancel();
-                                        for h in rt.handles {
-                                            let _ = tokio::time::timeout(Duration::from_secs(2), h).await;
-                                        }
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-
-                        Some(response) = rt.rx_response.recv() => {
-                            if self.sender.send(response).await.is_err() {
-                                error!("no se pudo enviar FsmResponse desde FsmService al Core");
-                            }
-                        }
-
-                        Some(heartbeat) = rt.rx_heartbeat_response.recv() => {
-                            match heartbeat {
-                                FsmServiceResponse::ToHub(HubMessage::Heartbeat(heartbeat)) => {
-                                    if self.sender.send(FsmServiceResponse::ToHub(HubMessage::Heartbeat(heartbeat))).await.is_err() {
-                                        error!("no se pudo enviar Heartbeat desde FsmService al Core");
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-                None => {
-                    tokio::select! {
-                        _ = shutdown.cancelled() => {
-                            info!("Shutdown recibido FsmService");
-                            break;
-                        }
-
-                        Some(cmd) = self.receiver.recv() => {
-                            match cmd {
-                                FsmServiceCommand::CreateRuntime => {
-                                    if runtime.is_none() {
-                                        runtime = Some(self.spawn_runtime());
-                                    }
-                                },
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
+use tracing::{debug, info, instrument};
 
 /// Estados Globales de nivel superior.
 ///
@@ -451,6 +184,7 @@ pub struct UpdateSession {
     handshake_hash: HashMap<String, u32>,
     state: StateOfSession,
     total_attempts: f64,
+    epoch: u32,
 }
 
 impl UpdateSession {
@@ -460,7 +194,16 @@ impl UpdateSession {
             handshake_hash: HashMap::new(),
             state: StateOfSession::None,
             total_attempts: 0.0,
+            epoch: 0,
         }
+    }
+
+    pub fn set_epoch(&mut self, epoch: u32) {
+        self.epoch = epoch
+    }
+
+    pub fn get_epoch(&self) -> u32 {
+        self.epoch
     }
 
     pub fn reset_total_attempts(&mut self) {

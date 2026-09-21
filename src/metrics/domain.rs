@@ -10,33 +10,60 @@
 //! - Parsing manual de calidad de señal WiFi (RSSI/dBm).
 
 use crate::context::domain::AppContext;
-use crate::message::logic::{Metadata, ServerMessage, SystemMetrics};
+use crate::message::{
+    domain::{Metadata, SystemMetrics},
+    logic::MessageHandle,
+};
 use crate::metrics::logic::{MetricsTimerEvent, metrics_timer, system_metrics};
-use std::fs;
-use std::process::Command;
-use std::time::Instant;
+use crate::system::domain::InternalEvent;
+use std::{fs, process::Command, time::Instant};
 use sysinfo::{Disks, Networks, System};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
+#[derive(Clone)]
+pub struct MetricsHandle {
+    tx: mpsc::Sender<InternalMetricsCommand>,
+}
+
+impl MetricsHandle {
+    pub async fn connection(&self, data: InternalEvent) {
+        let cmd = InternalMetricsCommand::Connection { data };
+        let _ = self.tx.send(cmd).await;
+    }
+}
+
+enum InternalMetricsCommand {
+    Connection { data: InternalEvent },
+}
+
 pub struct MetricsService {
-    sender: mpsc::Sender<ServerMessage>,
+    rx: mpsc::Receiver<InternalMetricsCommand>,
+    handler: MessageHandle,
     context: AppContext,
 }
 
 impl MetricsService {
-    pub fn new(sender: mpsc::Sender<ServerMessage>, context: AppContext) -> Self {
-        Self { sender, context }
+    pub fn new(handler: MessageHandle, context: AppContext) -> (Self, MetricsHandle) {
+        let (tx, rx) = mpsc::channel(10);
+        let service = Self {
+            rx,
+            handler,
+            context,
+        };
+        let handle = MetricsHandle { tx };
+        (service, handle)
     }
 
-    pub async fn run(self, shutdown: CancellationToken) {
-        let (tx_to_server, mut rx_command_from_server) = mpsc::channel::<ServerMessage>(100);
-        let (tx_to_timer, rx_from_metrics) = mpsc::channel::<MetricsTimerEvent>(100);
-        let (tx_to_metrics, rx_from_timer) = mpsc::channel::<MetricsTimerEvent>(100);
+    pub async fn run(&mut self, shutdown: CancellationToken) {
+        let (tx_to_timer, rx_from_metrics) = mpsc::channel::<MetricsTimerEvent>(50);
+        let (tx_to_metrics, rx_from_timer) = mpsc::channel::<MetricsTimerEvent>(50);
+        let (tx_conn, rx_conn) = mpsc::channel::<InternalEvent>(10);
 
         tokio::spawn(system_metrics(
-            tx_to_server,
+            rx_conn,
+            self.handler.clone(),
             tx_to_timer,
             rx_from_timer,
             self.context.clone(),
@@ -55,9 +82,13 @@ impl MetricsService {
                     info!("shutdown recibido Core");
                     break;
                 }
-                Some(msg) = rx_command_from_server.recv() => {
-                    if self.sender.send(msg).await.is_err() {
-                        error!("no se pudo enviar mensaje SystemMetrics");
+                Some(cmd) = self.rx.recv() => {
+                    match cmd {
+                        InternalMetricsCommand::Connection { data } => {
+                            if tx_conn.send(data).await.is_err() {
+                                error!("no se pudo enviar InternalEvent a system_metrics");
+                            }
+                        }
                     }
                 }
             }

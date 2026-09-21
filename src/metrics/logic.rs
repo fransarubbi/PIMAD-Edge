@@ -12,13 +12,14 @@
 //!
 
 use crate::context::domain::AppContext;
-use crate::message::logic::{Metadata, ServerMessage};
+use crate::message::{domain::Metadata, logic::MessageHandle};
 use crate::metrics::domain::MetricsCollector;
+use crate::system::domain::InternalEvent;
 use chrono::Utc;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, sleep};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, instrument};
+use tracing::{debug, error, info, instrument};
 
 /// Eventos de control para la coordinación del temporizador de métricas.
 ///
@@ -29,6 +30,8 @@ pub enum MetricsTimerEvent {
     InitTimer(Duration),
     /// Evento emitido cuando el tiempo de espera ha concluido.
     Timeout,
+    /// Evento para frenar el timer
+    StopTimer,
 }
 
 /// Orquestador principal de métricas del sistema.
@@ -46,7 +49,8 @@ pub enum MetricsTimerEvent {
 ///
 #[instrument(name = "system_metrics", skip_all)]
 pub async fn system_metrics(
-    tx_to_server: mpsc::Sender<ServerMessage>,
+    mut rx_conn: mpsc::Receiver<InternalEvent>,
+    handle: MessageHandle,
     tx_to_timer: mpsc::Sender<MetricsTimerEvent>,
     mut rx_from_timer: mpsc::Receiver<MetricsTimerEvent>,
     app_context: AppContext,
@@ -74,24 +78,45 @@ pub async fn system_metrics(
                 match msg {
                     MetricsTimerEvent::Timeout => {
                         metrics.prep_cpu_refresh();
-
                         // Definimos nuestra ventana de observación instantánea
                         tokio::time::sleep(Duration::from_millis(500)).await;
-
                         let metadata = Metadata {
                             sender_user_id: app_context.system.id_edge.clone(),
                             destination_id: "server0".to_string(),
                             timestamp: Utc::now().timestamp(),
                         };
-                        let sys_met = metrics.collect(metadata);
-                        let msg = ServerMessage::Metrics(sys_met);
-                        if tx_to_server.send(msg).await.is_err() {
-                            error!("no se pudo enviar mensaje de métricas a MetricsService");
-                        }
+                        let msg = metrics.collect(metadata);
+                        handle.serialize_edge_monitor(msg).await;
                         if tx_to_timer.send(MetricsTimerEvent::InitTimer(Duration::from_secs(30))).await.is_err() {
                             error!("no se pudo enviar evento InitTimer a metrics_timer");
                         }
                     },
+                    _ => {}
+                }
+            }
+
+            Some(cmd) = rx_conn.recv() => {
+                match cmd {
+                    InternalEvent::ServerConnected => {
+                        if tx_to_timer
+                            .send(MetricsTimerEvent::InitTimer(Duration::from_secs(30)))
+                            .await
+                            .is_err()
+                        {
+                            error!("no se pudo enviar evento InitTimer a metrics_timer");
+                            return;
+                        }
+                    }
+                    InternalEvent::ServerDisconnected => {
+                        if tx_to_timer
+                            .send(MetricsTimerEvent::StopTimer)
+                            .await
+                            .is_err()
+                        {
+                            error!("no se pudo enviar evento StopTimer a metrics_timer");
+                            return;
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -123,6 +148,7 @@ pub async fn metrics_timer(
     loop {
         let duration = match cmd_rx.recv().await {
             Some(MetricsTimerEvent::InitTimer(d)) => d,
+            Some(MetricsTimerEvent::StopTimer) => continue,
             None => break, // Canal cerrado, terminar tarea
             _ => continue,
         };
@@ -136,6 +162,9 @@ pub async fn metrics_timer(
                 if tx_to_metrics.send(MetricsTimerEvent::Timeout).await.is_err() {
                     error!("no se pudo enviar evento Timeout en metrics_timer");
                 }
+            }
+            Some(MetricsTimerEvent::StopTimer) = cmd_rx.recv() => {
+                debug!("Watchdog timer de fsm general, cancelado");
             }
         }
     }

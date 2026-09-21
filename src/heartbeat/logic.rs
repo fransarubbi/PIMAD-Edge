@@ -12,7 +12,7 @@
 
 use crate::config::heartbeat::*;
 use crate::heartbeat::domain::{Action, Event, FsmHeartbeat, State, Status, Transition};
-use crate::message::logic::ServerMessage;
+use crate::message::domain::Heartbeat;
 use crate::system::domain::InternalEvent;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -36,7 +36,7 @@ pub async fn heartbeat(
     tx: mpsc::Sender<InternalEvent>,
     tx_to_fsm: mpsc::Sender<Event>,
     tx_to_timer: mpsc::Sender<Event>,
-    mut rx_from_server: mpsc::Receiver<ServerMessage>,
+    mut rx_from_server: mpsc::Receiver<Heartbeat>,
     mut rx_fsm: mpsc::Receiver<Vec<Action>>,
     shutdown: CancellationToken,
 ) {
@@ -47,14 +47,9 @@ pub async fn heartbeat(
                 break;
             }
 
-            Some(msg) = rx_from_server.recv() => {
-                match msg {
-                    ServerMessage::Heartbeat(_) => {
-                        if tx_to_fsm.send(Event::Heartbeat).await.is_err() {
-                            error!("no se pudo enviar evento Heartbeat a la FSM heartbeat");
-                        }
-                    },
-                    _ => {}
+            Some(_) = rx_from_server.recv() => {
+                if tx_to_fsm.send(Event::Heartbeat).await.is_err() {
+                    error!("no se pudo enviar evento Heartbeat a la FSM heartbeat");
                 }
             }
 

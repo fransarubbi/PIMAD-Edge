@@ -18,31 +18,39 @@
 //! 4. **DeadServer:** Se agotó el tiempo de espera máximo (desconexión confirmada).
 
 use crate::heartbeat::logic::{heartbeat, run_fsm_heartbeat};
-use crate::message::logc::{ServrMesage};
+use crate::message::domain::Heartbeat;
 use crate::system::domain::InternalEvent;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument};
 
+#[derive(Clone)]
+pub struct HeartbeatHandle {
+    tx: mpsc::Sender<Heartbeat>,
+}
+
+impl HeartbeatHandle {
+    pub async fn send_heartbeat(&self, data: Heartbeat) {
+        let _ = self.tx.send(data).await;
+    }
+}
+
 pub struct HeartbeatService {
     sender: mpsc::Sender<InternalEvent>,
-    receiver: mpsc::Receiver<ServerMessage>,
+    rx: mpsc::Receiver<Heartbeat>,
 }
 
 impl HeartbeatService {
-    pub fn new(
-        sender: mpsc::Sender<InternalEvent>,
-        receiver: mpsc::Receiver<ServerMessage>,
-    ) -> Self {
-        Self { sender, receiver }
+    pub fn new(sender: mpsc::Sender<InternalEvent>, rx: mpsc::Receiver<Heartbeat>) -> Self {
+        Self { sender, rx }
     }
 
     pub async fn run(mut self, shutdown: CancellationToken) {
-        let (tx_to_core, mut rx) = mpsc::channel::<InternalEvent>(50);
-        let (tx_to_fsm, rx_from_heartbeat) = mpsc::channel::<Event>(50);
-        let (tx_to_timer, rx_watchdog_heartbeat) = mpsc::channel::<Event>(50);
-        let (tx_msg, rx_from_server) = mpsc::channel::<ServerMessage>(50);
+        let (tx_to_core, mut rx) = mpsc::channel::<InternalEvent>(10);
+        let (tx_to_fsm, rx_from_heartbeat) = mpsc::channel::<Event>(10);
+        let (tx_to_timer, rx_watchdog_heartbeat) = mpsc::channel::<Event>(10);
+        let (tx_msg, rx_from_server) = mpsc::channel::<Heartbeat>(10);
         let (tx_actions, rx_fsm) = mpsc::channel::<Vec<Action>>(50);
 
         let heartbeat_tx_to_fsm = tx_to_fsm.clone();
@@ -75,7 +83,7 @@ impl HeartbeatService {
                     break;
                 }
 
-                Some(msg) = self.receiver.recv() => {
+                Some(msg) = self.rx.recv() => {
                     if tx_msg.send(msg).await.is_err() {
                         error!("no se pudo enviar mensaje de Heartbeat proveniente del servidor");
                     }

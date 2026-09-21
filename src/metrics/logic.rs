@@ -12,14 +12,13 @@
 //!
 
 use crate::context::domain::AppContext;
-use crate::message::domain::{Metadata, ServerMessage};
+use crate::message::logic::{Metadata, ServerMessage};
 use crate::metrics::domain::MetricsCollector;
 use chrono::Utc;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, instrument};
-
 
 /// Eventos de control para la coordinación del temporizador de métricas.
 ///

@@ -19,7 +19,7 @@ use crate::database::domain::{DataServiceCommand, DataServiceResponse};
 use crate::firmware::domain::{FirmwareServiceCommand, FirmwareServiceResponse};
 use crate::fsm::domain::{FsmServiceCommand, FsmServiceResponse};
 use crate::grpc::FromEdge;
-use crate::message::domain::{
+use crate::message::logic::{
     HubMessage, MessageServiceCommand, MessageServiceResponse, ServerMessage,
 };
 use crate::mqtt::domain::MqttServiceCommand;

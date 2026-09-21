@@ -23,8 +23,9 @@ use crate::fsm::domain::{
 };
 
 use crate::message::domain::{
-    HandshakeToHub, Heartbeat, HubMessage, Metadata, PhaseNotification, StateToHub,
+    EdgeState, HandshakeToHub, Heartbeat, HubMessage, Metadata, PhaseNotification, StateToHub,
 };
+use crate::message::logic::MessageHandle;
 use crate::quorum::domain::ProtocolSettings;
 use chrono::Utc;
 use tokio::sync::mpsc;
@@ -538,7 +539,7 @@ pub async fn heartbeat_generator(
 ///
 #[instrument(name = "edge_state", skip_all)]
 pub async fn edge_state(
-    tx: mpsc::Sender<FsmServiceResponse>,
+    handle: MessageHandle,
     mut rx_command: mpsc::Receiver<StateGlobal>,
     app_context: AppContext,
     cancel: CancellationToken,
@@ -556,10 +557,12 @@ pub async fn edge_state(
             _ = ticker.tick() => {
                 match state {
                     StateGlobal::BalanceMode => {
-                        if tx.send(FsmServiceResponse::EdgeState("Balance".to_string())).await.is_err() {
-                            error!("no se pudo enviar mensaje EdgeState periódico");
-                        }
                         let metadata = build_metadata(&app_context, "all");
+                        let data = EdgeState {
+                            metadata: metadata.clone(),
+                            state: "Balance".to_string(),
+                        };
+                        handle.serialize_edge_state(data).await;
                         let state = StateToHub {
                             metadata,
                             state: "balance".to_string(),
@@ -568,15 +571,15 @@ pub async fn edge_state(
                             frequency: 0,
                             jitter: 0,
                         };
-                        if tx.send(FsmServiceResponse::ToHub(HubMessage::StateToHub(state))).await.is_err() {
-                            error!("no se pudo enviar mensaje EdgeState periódico");
-                        }
+                        handle.serialize_state_hub(state).await;
                     },
                     StateGlobal::Normal => {
-                        if tx.send(FsmServiceResponse::EdgeState("Normal".to_string())).await.is_err() {
-                            error!("no se pudo enviar mensaje EdgeState periódico");
-                        }
                         let metadata = build_metadata(&app_context, "all");
+                        let data = EdgeState {
+                            metadata: metadata.clone(),
+                            state: "Normal".to_string(),
+                        };
+                        handle.serialize_edge_state(data).await;
                         let state = StateToHub {
                             metadata,
                             state: "normal".to_string(),
@@ -585,15 +588,15 @@ pub async fn edge_state(
                             frequency: 0,
                             jitter: 0,
                         };
-                        if tx.send(FsmServiceResponse::ToHub(HubMessage::StateToHub(state))).await.is_err() {
-                            error!("no se pudo enviar mensaje EdgeState periódico");
-                        }
+                        handle.serialize_state_hub(state).await;
                     }
                     StateGlobal::SafeMode => {
-                        if tx.send(FsmServiceResponse::EdgeState("SafeMode".to_string())).await.is_err() {
-                            error!("no se pudo enviar mensaje EdgeState periódico");
-                        }
                         let metadata = build_metadata(&app_context, "all");
+                        let data = EdgeState {
+                            metadata: metadata.clone(),
+                            state: "SafeMode".to_string(),
+                        };
+                        handle.serialize_edge_state(data).await;
                         let jitter = fastrand::u32(0..=5);
                         let state = StateToHub {
                             metadata: metadata.clone(),
@@ -603,9 +606,7 @@ pub async fn edge_state(
                             frequency: app_context.quorum.get_frequency_safe_mode(),
                             jitter,
                         };
-                        if tx.send(FsmServiceResponse::ToHub(HubMessage::StateToHub(state))).await.is_err() {
-                            error!("no se pudo enviar mensaje EdgeState periódico");
-                        }
+                        handle.serialize_state_hub(state).await;
                     }
                     _ => {}
                 }

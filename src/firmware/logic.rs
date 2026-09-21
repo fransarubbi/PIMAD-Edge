@@ -6,10 +6,11 @@
 use crate::config::firmware::OTA_TIMEOUT;
 use crate::context::domain::AppContext;
 use crate::firmware::domain::Event;
-use crate::firmware::domain::{FirmwareServiceCommand, FirmwareServiceResponse};
-use crate::message::domain::{
-    FirmwareOutcome, FirmwareOutcomeError, HubMessage, Metadata, ServerMessage, UpdateEdgeFirmware,
-    UpdateFirmwareRequestHub,
+use crate::message::{
+    domain::{
+        FirmwareHubAck, FirmwareHubResult, Metadata, UpdateEdgeFirmware, UpdateFirmwareRequestHub,
+    },
+    logic::MessageHandle,
 };
 use chrono::Utc;
 use self_update::backends::github::Update;
@@ -23,6 +24,11 @@ enum State {
     Working,
 }
 
+pub enum CommandToHubOta {
+    Request(UpdateFirmwareRequestHub),
+    Response(FirmwareHubAck),
+}
+
 struct HubFirmwareStatus {
     pub id: String,
     pub is_updated: bool,
@@ -31,83 +37,65 @@ struct HubFirmwareStatus {
 
 #[instrument(name = "edge_ota", skip_all)]
 pub async fn edge_ota(
-    tx: mpsc::Sender<FirmwareServiceResponse>,
-    mut rx: mpsc::Receiver<FirmwareServiceCommand>,
+    mut rx: mpsc::Receiver<UpdateEdgeFirmware>,
+    handle: MessageHandle,
     app_context: AppContext,
 ) {
-    while let Some(cmd) = rx.recv().await {
-        if let FirmwareServiceCommand::UpdateEdge(update) = cmd {
-            if update.metadata.destination_id != app_context.system.id_edge {
-                info!("no se iniciará el proceso de actualización. ID equivocado");
-                continue;
-            }
-            let update_result = tokio::task::spawn_blocking(
-                || -> Result<_, Box<dyn std::error::Error + Send + Sync>> {
-                    Ok(Update::configure()
-                        .repo_owner("fransarubbi")
-                        .repo_name("PIMAD-Edge")
-                        .bin_name("pimad_edge")
-                        .show_download_progress(true)
-                        .current_version(env!("CARGO_PKG_VERSION"))
-                        .build()?
-                        .update()?)
-                },
-            )
-            .await;
+    while let Some(update) = rx.recv().await {
+        if update.metadata.destination_id != app_context.system.id_edge {
+            info!("no se iniciará el proceso de actualización. ID equivocado");
+            continue;
+        }
+        let update_result = tokio::task::spawn_blocking(
+            || -> Result<_, Box<dyn std::error::Error + Send + Sync>> {
+                Ok(Update::configure()
+                    .repo_owner("fransarubbi")
+                    .repo_name("PIMAD-Edge")
+                    .bin_name("pimad_edge")
+                    .show_download_progress(true)
+                    .current_version(env!("CARGO_PKG_VERSION"))
+                    .build()?
+                    .update()?)
+            },
+        )
+        .await;
 
-            match update_result {
-                Ok(Ok(status)) => {
-                    let metadata = Metadata {
-                        sender_user_id: app_context.system.id_edge.clone(),
-                        destination_id: "server0".to_string(),
-                        timestamp: Utc::now().timestamp(),
-                    };
-                    let update = UpdateEdgeFirmware {
-                        metadata,
-                        version: status.version().to_string(),
-                    };
+        match update_result {
+            Ok(Ok(status)) => {
+                let metadata = Metadata {
+                    sender_user_id: app_context.system.id_edge.clone(),
+                    destination_id: "server0".to_string(),
+                    timestamp: Utc::now().timestamp(),
+                };
+                let update = UpdateEdgeFirmware {
+                    metadata,
+                    version: status.version().to_string(),
+                };
 
-                    if status.is_updated() {
-                        info!("actualizado con éxito a la versión: {}", status.version());
-                        if tx
-                            .send(FirmwareServiceResponse::EdgeUpdated(
-                                ServerMessage::UpdateEdgeFirmware(update),
-                            ))
-                            .await
-                            .is_err()
-                        {
-                            error!("no se pudo enviar EdgeUpdated a FirmwareService");
-                        }
-                        // Dormir 10 segundos para dar tiempo a que el mensaje gRPC salga
-                        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                        std::process::exit(0);
-                    } else {
-                        info!("el sistema ya está en la última versión");
-                        if tx
-                            .send(FirmwareServiceResponse::EdgeUpdated(
-                                ServerMessage::UpdateEdgeFirmware(update),
-                            ))
-                            .await
-                            .is_err()
-                        {
-                            error!("no se pudo enviar EdgeUpdated a FirmwareService");
-                        }
-                    }
+                if status.is_updated() {
+                    info!("actualizado con éxito a la versión: {}", status.version());
+                    handle.serialize_edge_firmware_result(update).await;
+                    // Dormir 5 segundos para dar tiempo a que el mensaje gRPC salga
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    std::process::exit(0);
+                } else {
+                    info!("el sistema ya está en la última versión");
+                    handle.serialize_edge_firmware_result(update).await;
                 }
-                Ok(Err(e)) => error!("error en la actualización OTA: {}", e),
-                Err(e) => error!("error al ejecutar la tarea bloqueante (JoinError): {}", e),
             }
+            Ok(Err(e)) => error!("error en la actualización OTA: {}", e),
+            Err(e) => error!("error al ejecutar la tarea bloqueante (JoinError): {}", e),
         }
     }
 }
 
 #[instrument(name = "hub_ota", skip_all)]
 pub async fn hub_ota(
-    tx_to_core: mpsc::Sender<FirmwareServiceResponse>,
     tx_to_timer: mpsc::Sender<Event>,
-    mut rx_msg: mpsc::Receiver<FirmwareServiceCommand>,
+    mut rx_msg: mpsc::Receiver<CommandToHubOta>,
     mut rx_timer: mpsc::Receiver<Event>,
     app_context: AppContext,
+    handle: MessageHandle,
     cancel: CancellationToken,
 ) {
     let mut state = State::Sleeping;
@@ -127,9 +115,9 @@ pub async fn hub_ota(
                 break;
             }
 
-            Some(msg_from_server) = rx_msg.recv() => {
-                match msg_from_server {
-                    FirmwareServiceCommand::UpdateHub(update) => {
+            Some(cmd) = rx_msg.recv() => {
+                match cmd {
+                    CommandToHubOta::Request(update) => {
                         state = State::Working;
                         process_vector.clear();
                         index = 0;
@@ -150,10 +138,7 @@ pub async fn hub_ota(
                                     network.clone(),
                                     error
                                 );
-                                if tx_to_core.send(FirmwareServiceResponse::ServerAck(ServerMessage::FirmwareOutcomeError(msg))).await.is_err(){
-                                    error!("no se pudo enviar FirmwareOutcomeError al servidor");
-                                }
-
+                                handle.serialize_hub_firmware_result(msg).await;
                             } else {
                                 let total = vec_of_ids.len();
                                 info!("iniciando nueva sesión de actualización de firmware. Red {}. Cantidad de Hubs {}", network, total);
@@ -173,10 +158,7 @@ pub async fn hub_ota(
                                     network.clone(),
                                     version.clone()
                                 );
-
-                                if tx_to_core.send(FirmwareServiceResponse::HubCommand(HubMessage::UpdateFirmwareRequest(msg))).await.is_err() {
-                                    error!("no se pudo enviar mensaje al Hub");
-                                }
+                                handle.serialize_update_hub_firmware(msg).await;
 
                                 if tx_to_timer.send(Event::InitTimer(OTA_TIMEOUT)).await.is_err(){
                                     error!("no se pudo enviar InitTimer");
@@ -191,28 +173,22 @@ pub async fn hub_ota(
                                 network.clone(),
                                 error
                             );
-                            if tx_to_core.send(FirmwareServiceResponse::ServerAck(ServerMessage::FirmwareOutcomeError(msg))).await.is_err(){
-                                error!("no se pudo enviar FirmwareOutcomeError al servidor");
-                            }
+                            handle.serialize_hub_firmware_result(msg).await;
                         }
                     },
 
-                    FirmwareServiceCommand::HubResponse(firmware) => {
+                    CommandToHubOta::Response(firmware) => {
                         if state == State::Working {
                             if index < process_vector.len() {
                                 let id = process_vector[index].id.clone();
                                 if firmware.metadata.sender_user_id == id {
-
                                     if tx_to_timer.send(Event::StopTimer).await.is_err() {
                                         error!("no se pudo enviar StopTimer");
                                     }
-
                                     process_vector[index].is_updated = firmware.is_updated;
                                     process_vector[index].success = firmware.success;
                                     index = index + 1;
-
                                     if index < process_vector.len() {
-
                                         let msg = generate_message_to_hub(
                                             &process_vector,
                                             index,
@@ -220,15 +196,10 @@ pub async fn hub_ota(
                                             network.clone(),
                                             version.clone()
                                         );
-
-                                        if tx_to_core.send(FirmwareServiceResponse::HubCommand(HubMessage::UpdateFirmwareRequest(msg))).await.is_err(){
-                                            error!("no se pudo enviar mensaje al Hub");
-                                        }
-
+                                        handle.serialize_update_hub_firmware(msg).await;
                                         if tx_to_timer.send(Event::InitTimer(OTA_TIMEOUT)).await.is_err() {
                                             error!("no se pudo enviar InitTimer");
                                         }
-
                                     } else {
                                         state = State::Sleeping;
                                         let msg = generate_outcome(
@@ -236,9 +207,7 @@ pub async fn hub_ota(
                                             app_context.system.id_edge.clone(),
                                             network.clone()
                                         );
-                                        if tx_to_core.send(FirmwareServiceResponse::ServerAck(ServerMessage::FirmwareOutcome(msg))).await.is_err(){
-                                            error!("no se pudo enviar FirmwareOutcome al servidor");
-                                        }
+                                        handle.serialize_hub_firmware_result(msg).await;
                                     }
                                 }
                             }
@@ -251,17 +220,13 @@ pub async fn hub_ota(
             Some(event) = rx_timer.recv() => {
                 match event {
                     Event::Timeout => {
-
                         if tx_to_timer.send(Event::StopTimer).await.is_err() {
                             error!("no se pudo enviar StopTimer");
                         }
-
                         process_vector[index].is_updated = false;
                         process_vector[index].success = false;
                         index =  index + 1;
-
                         if index < process_vector.len() {
-
                             let msg = generate_message_to_hub(
                                 &process_vector,
                                 index,
@@ -269,15 +234,10 @@ pub async fn hub_ota(
                                 network.clone(),
                                 version.clone()
                             );
-
-                            if tx_to_core.send(FirmwareServiceResponse::HubCommand(HubMessage::UpdateFirmwareRequest(msg))).await.is_err(){
-                                error!("no se pudo enviar mensaje al Hub");
-                            }
-
+                            handle.serialize_update_hub_firmware(msg).await;
                             if tx_to_timer.send(Event::InitTimer(OTA_TIMEOUT)).await.is_err() {
                                 error!("no se pudo enviar InitTimer");
                             }
-
                         } else {
                             state = State::Sleeping;
                             let msg = generate_outcome(
@@ -285,9 +245,7 @@ pub async fn hub_ota(
                                 app_context.system.id_edge.clone(),
                                 network.clone()
                             );
-                            if tx_to_core.send(FirmwareServiceResponse::ServerAck(ServerMessage::FirmwareOutcome(msg))).await.is_err(){
-                                error!("no se pudo enviar FirmwareOutcome Ok al servidor");
-                            }
+                            handle.serialize_hub_firmware_result(msg).await;
                         }
                     }
                     _ => {}
@@ -304,11 +262,8 @@ async fn get_firmware_version() -> Result<String, reqwest::Error> {
 
     let response = reqwest::get(url).await?;
     let version_text = response.text().await?;
-
     let cleaned = version_text.trim();
-
     let final_version = cleaned.strip_prefix('v').unwrap_or(cleaned);
-
     Ok(final_version.to_string())
 }
 
@@ -320,7 +275,6 @@ fn generate_message_to_hub(
     version: String,
 ) -> UpdateFirmwareRequestHub {
     let hub_id = process_vector[index].id.clone();
-
     let timestamp = Utc::now().timestamp();
 
     info!(
@@ -332,7 +286,6 @@ fn generate_message_to_hub(
         destination_id: hub_id,
         timestamp: timestamp,
     };
-
     let msg = UpdateFirmwareRequestHub {
         metadata,
         network: network,
@@ -341,7 +294,7 @@ fn generate_message_to_hub(
     msg
 }
 
-fn generate_outcome_error(id_edge: String, network: String, error: String) -> FirmwareOutcomeError {
+fn generate_outcome_error(id_edge: String, network: String, error: String) -> FirmwareHubResult {
     let timestamp = Utc::now().timestamp();
     info!(
         "generando mensaje de error para el servidor: {}, en la red: {}, error: {}",
@@ -353,9 +306,10 @@ fn generate_outcome_error(id_edge: String, network: String, error: String) -> Fi
         timestamp: timestamp,
     };
 
-    let msg = FirmwareOutcomeError {
+    let msg = FirmwareHubResult {
         metadata,
         network,
+        percentage_ok: 0.0,
         error,
     };
     msg
@@ -365,7 +319,7 @@ fn generate_outcome(
     process_vector: &Vec<HubFirmwareStatus>,
     id_edge: String,
     network: String,
-) -> FirmwareOutcome {
+) -> FirmwareHubResult {
     let total = process_vector.len();
     let mut counter = 0;
     for status in process_vector {
@@ -386,11 +340,11 @@ fn generate_outcome(
         timestamp: timestamp,
     };
 
-    let msg = FirmwareOutcome {
+    let msg = FirmwareHubResult {
         metadata,
         network,
         percentage_ok,
+        error: " ".to_string(),
     };
-
     msg
 }

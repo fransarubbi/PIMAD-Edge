@@ -1,6 +1,6 @@
-use sqlx::{Executor, QueryBuilder, Sqlite, SqlitePool};
 use crate::database::repository::pop_batch_generic;
 use crate::message::domain::AlertTh;
+use sqlx::{Executor, QueryBuilder, Sqlite, SqlitePool};
 
 /// Crea la tabla `alert_temp` en la base de datos si aún no existe.
 ///
@@ -39,7 +39,7 @@ use crate::message::domain::AlertTh;
 /// - Se asume que el nombre de la tabla es estable y conocido por el sistema.
 ///
 
-pub async fn create_table_alert_temp(pool: &SqlitePool) -> Result<(), sqlx::Error>  {
+pub async fn create_table_alert_temp(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     pool.execute(
         r#"
         CREATE TABLE IF NOT EXISTS alert_temp (
@@ -50,13 +50,12 @@ pub async fn create_table_alert_temp(pool: &SqlitePool) -> Result<(), sqlx::Erro
             initial_temp         REAL NOT NULL,
             actual_temp          REAL NOT NULL
         );
-        "#
+        "#,
     )
-        .await?;
-    
+    .await?;
+
     Ok(())
 }
-
 
 /// Inserta un lote (*batch*) de mediciones en la tabla `alert_temp`.
 ///
@@ -95,10 +94,10 @@ pub async fn create_table_alert_temp(pool: &SqlitePool) -> Result<(), sqlx::Erro
 ///   (controlados por `BATCH_SIZE` en capas superiores).
 ///
 
-pub async fn insert_alert_temp(pool: &SqlitePool,
-                               data_vec: &Vec<AlertTh>
-                              ) -> Result<(), sqlx::Error> {
-
+pub async fn insert_alert_temp(
+    pool: &SqlitePool,
+    data_vec: &Vec<AlertTh>,
+) -> Result<(), sqlx::Error> {
     if data_vec.is_empty() {
         return Ok(());
     }
@@ -107,7 +106,7 @@ pub async fn insert_alert_temp(pool: &SqlitePool,
         "INSERT INTO alert_temp (
             sender_user_id, destination_id, timestamp,
             network_id, initial_temp, actual_temp
-      )"
+      )",
     );
 
     query_builder.push_values(data_vec, |mut b, data| {
@@ -124,7 +123,6 @@ pub async fn insert_alert_temp(pool: &SqlitePool,
 
     Ok(())
 }
-
 
 /// Extrae y elimina un lote de mediciones de la tabla `alert_temp`.
 ///
@@ -159,4 +157,3 @@ pub async fn insert_alert_temp(pool: &SqlitePool,
 pub async fn pop_batch_alert_temp(pool: &SqlitePool) -> Result<Vec<AlertTh>, sqlx::Error> {
     pop_batch_generic(pool, "alert_temp").await
 }
-

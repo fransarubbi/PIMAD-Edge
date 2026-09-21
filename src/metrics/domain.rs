@@ -9,49 +9,45 @@
 //! - Lectura manual de temperatura térmica (Thermal Zone 0).
 //! - Parsing manual de calidad de señal WiFi (RSSI/dBm).
 
-
-use sysinfo::{System, Disks, Networks};
+use crate::context::domain::AppContext;
+use crate::message::logic::{Metadata, ServerMessage, SystemMetrics};
+use crate::metrics::logic::{MetricsTimerEvent, metrics_timer, system_metrics};
 use std::fs;
 use std::process::Command;
 use std::time::Instant;
+use sysinfo::{Disks, Networks, System};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
-use crate::context::domain::AppContext;
-use crate::message::domain::{Metadata, ServerMessage, SystemMetrics};
-use crate::metrics::logic::{metrics_timer, system_metrics, MetricsTimerEvent};
-
 
 pub struct MetricsService {
     sender: mpsc::Sender<ServerMessage>,
     context: AppContext,
 }
 
-
 impl MetricsService {
-    pub fn new(sender: mpsc::Sender<ServerMessage>,
-               context: AppContext) -> Self {
-        Self {
-            sender,
-            context
-        }
+    pub fn new(sender: mpsc::Sender<ServerMessage>, context: AppContext) -> Self {
+        Self { sender, context }
     }
-    
-    pub async fn run(self, shutdown: CancellationToken) {
 
+    pub async fn run(self, shutdown: CancellationToken) {
         let (tx_to_server, mut rx_command_from_server) = mpsc::channel::<ServerMessage>(100);
         let (tx_to_timer, rx_from_metrics) = mpsc::channel::<MetricsTimerEvent>(100);
         let (tx_to_metrics, rx_from_timer) = mpsc::channel::<MetricsTimerEvent>(100);
-        
-        tokio::spawn(system_metrics(tx_to_server,
-                                    tx_to_timer,
-                                    rx_from_timer,
-                                    self.context.clone(),
-                                    shutdown.clone()));
-        
-        tokio::spawn(metrics_timer(tx_to_metrics,
-                                   rx_from_metrics,
-                                   shutdown.clone()));
+
+        tokio::spawn(system_metrics(
+            tx_to_server,
+            tx_to_timer,
+            rx_from_timer,
+            self.context.clone(),
+            shutdown.clone(),
+        ));
+
+        tokio::spawn(metrics_timer(
+            tx_to_metrics,
+            rx_from_metrics,
+            shutdown.clone(),
+        ));
 
         loop {
             tokio::select! {
@@ -69,7 +65,6 @@ impl MetricsService {
     }
 }
 
-
 /// Recolector de estado del sistema.
 ///
 /// Mantiene las instancias de las estructuras de `sysinfo` para evitar
@@ -84,16 +79,13 @@ pub struct MetricsCollector {
     start_time: Instant,
 }
 
-
 /// Representación interna de la señal inalámbrica.
 pub struct WifiSignal {
     pub rssi: i32,
     pub dbm: i32,
 }
 
-
 impl MetricsCollector {
-
     /// Crea una nueva instancia del recolector.
     ///
     /// Inicializa y escanea todos los componentes de hardware disponibles.
@@ -124,7 +116,6 @@ impl MetricsCollector {
         }
     }
 
-    
     pub fn prep_cpu_refresh(&mut self) {
         self.system.refresh_cpu_usage();
     }
@@ -196,7 +187,7 @@ impl MetricsCollector {
         // WiFi (específico para interfaz wlan0)
         let wifi = read_wifi_signal("wlan0");
         let wifi_rssi = wifi.as_ref().map(|w| w.rssi);
-        let wifi_signal_dbm  = wifi.as_ref().map(|w| w.dbm);
+        let wifi_signal_dbm = wifi.as_ref().map(|w| w.dbm);
 
         let ram_used_by_service_mb = match read_service_memory_mb() {
             Some(ram) => ram,
@@ -219,11 +210,10 @@ impl MetricsCollector {
             network_rx_bytes,
             network_tx_bytes,
             wifi_rssi,
-            wifi_signal_dbm
+            wifi_signal_dbm,
         }
     }
 }
-
 
 /// Lee la temperatura de la CPU directamente desde el sistema de archivos virtual.
 ///
@@ -238,7 +228,6 @@ fn read_cpu_temperature() -> Option<f32> {
     Some(millideg / 1000.0)
 }
 
-
 fn read_wifi_signal(interface: &str) -> Option<WifiSignal> {
     // Intentar primero con /proc (más confiable)
     if let Some(signal) = read_wifi_from_proc(interface) {
@@ -248,7 +237,6 @@ fn read_wifi_signal(interface: &str) -> Option<WifiSignal> {
     // Fallback a iw si /proc falla
     read_wifi_from_iw(interface)
 }
-
 
 fn read_wifi_from_proc(interface: &str) -> Option<WifiSignal> {
     let content = fs::read_to_string("/proc/net/wireless").ok()?;
@@ -271,7 +259,6 @@ fn read_wifi_from_proc(interface: &str) -> Option<WifiSignal> {
     None
 }
 
-
 fn read_wifi_from_iw(interface: &str) -> Option<WifiSignal> {
     let output = Command::new("iw")
         .args(&["dev", interface, "link"])
@@ -290,7 +277,6 @@ fn read_wifi_from_iw(interface: &str) -> Option<WifiSignal> {
     None
 }
 
-
 /// Convierte dBm a escala RSSI 0-100
 /// -90 dBm o menos = 0% (sin señal)
 /// -30 dBm o más = 100% (excelente)
@@ -305,7 +291,6 @@ fn calculate_rssi_from_dbm(dbm: i32) -> i32 {
     }
 }
 
-
 /// Lee la memoria RAM real (Resident Set Size) consumida por este proceso.
 ///
 /// Intenta leer `/proc/self/status` y buscar la línea VmRSS.
@@ -315,7 +300,7 @@ fn calculate_rssi_from_dbm(dbm: i32) -> i32 {
 /// * `None`: Si falla la lectura o el parseo.
 fn read_service_memory_mb() -> Option<u64> {
     let content = std::fs::read_to_string("/proc/self/status").ok()?;
-    
+
     for line in content.lines() {
         if line.starts_with("VmRSS:") {
             let parts: Vec<&str> = line.split_whitespace().collect();

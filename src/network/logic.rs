@@ -13,20 +13,21 @@
 //! - **[`network_dba`]:** El "Traductor de Persistencia". Escucha los cambios de estado dictaminados
 //!   por el administrador y los convierte en comandos transaccionales para la base de datos.
 
-
-use std::collections::{HashMap, HashSet};
-use chrono::Utc;
-use tokio::sync::{mpsc};
-use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, instrument};
 use crate::context::domain::AppContext;
 use crate::database::domain::DataServiceCommand;
-use crate::message::domain::{ActiveHub, DeleteHub, HubMessage, 
-                             Metadata, Network as NetworkMsg, ServerMessage};
-use crate::network::domain::{Batch, HubChanged, HubRow, Network, NetworkAction, 
-                             NetworkChanged, NetworkRow, NetworkServiceResponse};
+use crate::message::logic::{
+    ActiveHub, DeleteHub, HubMessage, Metadata, Network as NetworkMsg, ServerMessage,
+};
 use crate::network::domain::NetworkAction::{Delete, Ignore, Insert, Update};
-
+use crate::network::domain::{
+    Batch, HubChanged, HubRow, Network, NetworkAction, NetworkChanged, NetworkRow,
+    NetworkServiceResponse,
+};
+use chrono::Utc;
+use std::collections::{HashMap, HashSet};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, error, info, instrument};
 
 /// Tarea principal de procesamiento y reglas de negocio de la red.
 ///
@@ -47,17 +48,18 @@ use crate::network::domain::NetworkAction::{Delete, Ignore, Insert, Update};
 /// Utiliza `hub_hash_aux` para almacenar temporalmente las configuraciones dictadas por el servidor
 /// hasta que el Hub físico confirme su aplicación mediante un `FromHubSettingsAck`.
 #[instrument(name = "network_admin", skip_all)]
-pub async fn network_admin(tx_to_insert_network: mpsc::Sender<NetworkChanged>,
-                           tx_to_core: mpsc::Sender<NetworkServiceResponse>,
-                           tx_to_insert_hub: mpsc::Sender<HubChanged>,
-                           mut rx_from_server: mpsc::Receiver<ServerMessage>,
-                           mut rx_from_hub: mpsc::Receiver<HubMessage>,
-                           mut rx_batch: mpsc::Receiver<Batch>,
-                           app_context: AppContext,
-                           shutdown: CancellationToken) {
+pub async fn network_admin(
+    tx_to_insert_network: mpsc::Sender<NetworkChanged>,
+    tx_to_core: mpsc::Sender<NetworkServiceResponse>,
+    tx_to_insert_hub: mpsc::Sender<HubChanged>,
+    mut rx_from_server: mpsc::Receiver<ServerMessage>,
+    mut rx_from_hub: mpsc::Receiver<HubMessage>,
+    mut rx_batch: mpsc::Receiver<Batch>,
+    app_context: AppContext,
+    shutdown: CancellationToken,
+) {
+    let mut hub_hash_aux: HashMap<String, HashSet<HubRow>> = HashMap::new();
 
-    let mut hub_hash_aux : HashMap<String, HashSet<HubRow>> = HashMap::new();
-    
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => {
@@ -108,7 +110,7 @@ pub async fn network_admin(tx_to_insert_network: mpsc::Sender<NetworkChanged>,
                     _ => {},
                 }
             }
-            
+
             Some(msg_from_hub) = rx_from_hub.recv() => {
                 match msg_from_hub {
                     HubMessage::LinkageRequest(request) => {
@@ -132,7 +134,7 @@ pub async fn network_admin(tx_to_insert_network: mpsc::Sender<NetworkChanged>,
                     _ => {},
                 }
             }
-            
+
             Some(batch) = rx_batch.recv() => {
                 match batch {
                     Batch::Network(networks) => {
@@ -161,21 +163,23 @@ pub async fn network_admin(tx_to_insert_network: mpsc::Sender<NetworkChanged>,
     }
 }
 
-
 /// Ejecuta la mutación de estado en la memoria caché (`NetworkManager`).
 ///
 /// Obtiene un bloqueo de escritura (`write().await`) exclusivo sobre el manejador, aplica
 /// la operación requerida (Delete, Update, Insert) y retorna el evento de dominio
 /// correspondiente (`NetworkChanged`) para ser procesado por los demás sistemas.
-async fn handle_action(app_context: AppContext, 
-                       network: &NetworkMsg, 
-                       action: NetworkAction) -> NetworkChanged {
-    
+async fn handle_action(
+    app_context: AppContext,
+    network: &NetworkMsg,
+    action: NetworkAction,
+) -> NetworkChanged {
     let mut manager = app_context.net_man.write().await;
-    let net_chan : NetworkChanged = match action {
+    let net_chan: NetworkChanged = match action {
         Delete => {
             manager.remove_network(&network.id_network);
-            NetworkChanged::Delete { id: network.id_network.clone() }
+            NetworkChanged::Delete {
+                id: network.id_network.clone(),
+            }
         }
         Update => {
             manager.change_active(network.active, &network.id_network);
@@ -183,10 +187,7 @@ async fn handle_action(app_context: AppContext,
             NetworkChanged::Update(net)
         }
         Insert => {
-            manager.add_network( Network::new(
-                network.id_network.clone(),
-                network.active
-            ));
+            manager.add_network(Network::new(network.id_network.clone(), network.active));
             let net = NetworkRow::new(network.id_network.clone(), network.active);
             NetworkChanged::Insert(net)
         }
@@ -195,7 +196,6 @@ async fn handle_action(app_context: AppContext,
     net_chan
 }
 
-
 /// Función auxiliar para distribuir las consecuencias de un cambio de red.
 ///
 /// Disemina el evento hacia dos destinos críticos:
@@ -203,11 +203,12 @@ async fn handle_action(app_context: AppContext,
 ///    los dispositivos físicos informándoles del cambio en su red.
 /// 2. `tx_to_insert_network`: Envía el evento a `network_dba` para asegurar la
 ///    persistencia del cambio en SQLite.
-async fn handle_event(tx_to_insert_network: &mpsc::Sender<NetworkChanged>,
-                      tx_to_core: &mpsc::Sender<NetworkServiceResponse>,
-                      net_chan: NetworkChanged,
-                      app_context: AppContext) {
-
+async fn handle_event(
+    tx_to_insert_network: &mpsc::Sender<NetworkChanged>,
+    tx_to_core: &mpsc::Sender<NetworkServiceResponse>,
+    net_chan: NetworkChanged,
+    app_context: AppContext,
+) {
     match net_chan.clone() {
         NetworkChanged::Delete { id } => {
             let metadata = create_metadata(app_context.clone());
@@ -215,10 +216,16 @@ async fn handle_event(tx_to_insert_network: &mpsc::Sender<NetworkChanged>,
                 metadata,
                 network: id,
             };
-            if tx_to_core.send(NetworkServiceResponse::HubMessage(HubMessage::DeleteHub(delete_hub))).await.is_err() {
+            if tx_to_core
+                .send(NetworkServiceResponse::HubMessage(HubMessage::DeleteHub(
+                    delete_hub,
+                )))
+                .await
+                .is_err()
+            {
                 error!("Error: No se pudo enviar mensaje de eliminación de red a los hubs");
             }
-        },
+        }
         NetworkChanged::Update(network) => {
             let metadata = create_metadata(app_context.clone());
             let active_hub = ActiveHub {
@@ -226,18 +233,25 @@ async fn handle_event(tx_to_insert_network: &mpsc::Sender<NetworkChanged>,
                 network: network.id_network,
                 active: network.active,
             };
-            if tx_to_core.send(NetworkServiceResponse::HubMessage(HubMessage::ActiveHub(active_hub))).await.is_err() {
-                error!("Error: No se pudo enviar mensaje de activación/desactivación de red a los hubs");
+            if tx_to_core
+                .send(NetworkServiceResponse::HubMessage(HubMessage::ActiveHub(
+                    active_hub,
+                )))
+                .await
+                .is_err()
+            {
+                error!(
+                    "Error: No se pudo enviar mensaje de activación/desactivación de red a los hubs"
+                );
             }
-        },
-        _ => {},
+        }
+        _ => {}
     }
 
     if tx_to_insert_network.send(net_chan).await.is_err() {
         error!("Error: No se pudo enviar NetworkChanged");
     }
 }
-
 
 /// Crea una cabecera de metadatos estandarizada para mensajes generados internamente.
 ///
@@ -254,7 +268,6 @@ fn create_metadata(app_context: AppContext) -> Metadata {
     metadata
 }
 
-
 /// Tarea de traducción y persistencia para configuraciones de red y hubs.
 ///
 /// Consume los eventos de dominio (`NetworkChanged`, `HubChanged`) emitidos por `network_admin`
@@ -265,11 +278,12 @@ fn create_metadata(app_context: AppContext) -> Metadata {
 /// - **Redes:** Propaga la creación, actualización de estado (`active`) o eliminación en cascada.
 /// - **Hubs:** Propaga registros (Autodescubrimiento), actualizaciones o bajas (Server request).
 #[instrument(name = "network_dba", skip_all)]
-pub async fn network_dba(tx: mpsc::Sender<DataServiceCommand>,
-                         mut rx_from_network: mpsc::Receiver<NetworkChanged>,
-                         mut rx_from_network_hub: mpsc::Receiver<HubChanged>,
-                         shutdown: CancellationToken) {
-
+pub async fn network_dba(
+    tx: mpsc::Sender<DataServiceCommand>,
+    mut rx_from_network: mpsc::Receiver<NetworkChanged>,
+    mut rx_from_network_hub: mpsc::Receiver<HubChanged>,
+    shutdown: CancellationToken,
+) {
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => {

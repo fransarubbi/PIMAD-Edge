@@ -23,7 +23,7 @@ use crate::config::mqtt_service::{
     KEY_EDGE_MQTT, MTLS_PORT,
 };
 use crate::context::domain::AppContext;
-use crate::message::domain::SerializedMessage;
+use crate::message::logic::SerializedMessage;
 use crate::mqtt::domain::{MqttServiceCommand, PayloadTopic};
 use crate::network::domain::NetworkManager;
 use crate::system::domain::{ErrorType, InternalEvent, System};

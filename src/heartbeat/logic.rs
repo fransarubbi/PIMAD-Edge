@@ -10,15 +10,13 @@
 //! El objetivo es detectar caídas de conexión cuando el servidor deja de enviar
 //! mensajes periódicos y notificar al resto del sistema vía un canal `watch`.
 
-
-use tokio::sync::{mpsc};
+use crate::config::heartbeat::*;
+use crate::heartbeat::domain::{Action, Event, FsmHeartbeat, State, Status, Transition};
+use crate::message::logic::ServerMessage;
+use crate::system::domain::InternalEvent;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, instrument, warn};
-use crate::heartbeat::domain::{Action, Event, FsmHeartbeat, State, Status, Transition};
-use crate::message::domain::{ServerMessage};
-use crate::config::heartbeat::*;
-use crate::system::domain::InternalEvent;
-
 
 /// Tarea principal de orquestación del Heartbeat.
 ///
@@ -34,13 +32,14 @@ use crate::system::domain::InternalEvent;
 /// * `rx_from_server`: Canal por donde llegan los mensajes decodificados gRPC.
 /// * `rx_fsm`: Canal por donde la FSM envía las instrucciones (Acciones) que deben ejecutarse.
 #[instrument(name = "heartbeat", skip_all)]
-pub async fn heartbeat(tx: mpsc::Sender<InternalEvent>,
-                       tx_to_fsm: mpsc::Sender<Event>,
-                       tx_to_timer: mpsc::Sender<Event>,
-                       mut rx_from_server: mpsc::Receiver<ServerMessage>,
-                       mut rx_fsm: mpsc::Receiver<Vec<Action>>,
-                       shutdown: CancellationToken) {
-
+pub async fn heartbeat(
+    tx: mpsc::Sender<InternalEvent>,
+    tx_to_fsm: mpsc::Sender<Event>,
+    tx_to_timer: mpsc::Sender<Event>,
+    mut rx_from_server: mpsc::Receiver<ServerMessage>,
+    mut rx_fsm: mpsc::Receiver<Vec<Action>>,
+    shutdown: CancellationToken,
+) {
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => {
@@ -99,7 +98,6 @@ pub async fn heartbeat(tx: mpsc::Sender<InternalEvent>,
     }
 }
 
-
 /// Tarea que ejecuta la lógica pura de la FSM del Heartbeat.
 ///
 /// Mantiene el estado interno (`FsmHeartbeat`) y procesa eventos secuencialmente.
@@ -110,10 +108,11 @@ pub async fn heartbeat(tx: mpsc::Sender<InternalEvent>,
 /// * `tx_actions`: Canal para enviar las acciones resultantes (Side Effects) al orquestador.
 /// * `rx_from_server`: Canal de entrada de eventos (Heartbeats recibidos, Timeouts del timer).
 #[instrument(name = "run_fsm_heartbeat", skip_all)]
-pub async fn run_fsm_heartbeat(tx_actions: mpsc::Sender<Vec<Action>>,
-                               mut rx_from_heartbeat: mpsc::Receiver<Event>,
-                               shutdown: CancellationToken) {
-
+pub async fn run_fsm_heartbeat(
+    tx_actions: mpsc::Sender<Vec<Action>>,
+    mut rx_from_heartbeat: mpsc::Receiver<Event>,
+    shutdown: CancellationToken,
+) {
     let mut state = FsmHeartbeat::new();
 
     loop {

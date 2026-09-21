@@ -252,18 +252,17 @@ impl DataHandle {
 }
 
 pub struct DataService {
-    tx: mpsc::Sender<TableDataVector>, // canal para enviar batches extraídos
+    tx_batch: mpsc::Sender<TableDataVector>, // canal para enviar batches extraídos
     rx: mpsc::Receiver<InternalDataCommand>,
     repo: Repository,
 }
 
 impl DataService {
-    pub fn new(
-        tx: mpsc::Sender<TableDataVector>,
-        rx: mpsc::Receiver<InternalDataCommand>,
-        repo: Repository,
-    ) -> Self {
-        Self { tx, rx, repo }
+    pub fn new(tx_batch: mpsc::Sender<TableDataVector>, repo: Repository) -> (Self, DataHandle) {
+        let (tx, rx) = mpsc::channel(50);
+        let service = Self { tx_batch, rx, repo };
+        let handle = DataHandle { tx };
+        (service, handle)
     }
 
     pub async fn run(mut self, shutdown: CancellationToken) {
@@ -402,7 +401,7 @@ impl DataService {
                         break;
                     }
 
-                    if self.tx.send(batch).await.is_err() {
+                    if self.tx_batch.send(batch).await.is_err() {
                         error!("canal cerrado, no se pudo enviar pop batch al Core");
                         break;
                     }
@@ -421,7 +420,7 @@ impl DataService {
 
 /// Estructura que agrupa un lote de datos de un tipo específico junto con su metadato de origen.
 /// Se utiliza para mover batches desde la DB hacia el sistema de mensajería.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct TableDataVector {
     pub measurement: Vec<Measurement>,
     pub alert_air: Vec<AlertAir>,

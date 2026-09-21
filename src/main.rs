@@ -1,45 +1,41 @@
-mod system;
-mod mqtt;
-mod message;
-mod database;
+mod channels;
 mod config;
-mod network;
-mod fsm;
 mod context;
+mod core;
+mod database;
 mod firmware;
-mod metrics;
+mod fsm;
 mod grpc_service;
 mod heartbeat;
+mod message;
+mod metrics;
+mod mqtt;
+mod network;
 mod quorum;
-mod core;
-mod channels;
-
+mod system;
 
 pub mod grpc {
     tonic::include_proto!("grpc");
 }
 
-
-use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
-use futures::stream::{FuturesUnordered, StreamExt};
-use tracing_subscriber::EnvFilter;
 use crate::channels::domain::Channels;
 use crate::core::domain::Core;
 use crate::database::domain::DataService;
 use crate::database::repository::Repository;
-use crate::firmware::domain::{FirmwareService};
-use crate::fsm::domain::{FsmService};
+use crate::firmware::domain::FirmwareService;
+use crate::fsm::domain::FsmService;
 use crate::grpc_service::domain::GrpcService;
 use crate::heartbeat::domain::HeartbeatService;
-use crate::message::domain::{MessageService};
+use crate::message::logic::MessageService;
 use crate::metrics::domain::MetricsService;
 use crate::mqtt::domain::MqttService;
-use crate::network::domain::{NetworkService};
-use crate::system::domain::{init_tracing};
+use crate::network::domain::NetworkService;
+use crate::system::domain::init_tracing;
 use crate::system::fsm::init_fsm;
-
-
+use futures::stream::{FuturesUnordered, StreamExt};
+use tokio_util::sync::CancellationToken;
+use tracing::{error, info};
+use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -60,6 +56,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let channels = Channels::new(app_context.system.buffer_size);
     let shutdown_token = CancellationToken::new();
+
+    /*
+    * // 1. Instanciar los servicios (obteniendo sus Handles)
+    let (mqtt_service, mqtt_handle) = MqttService::new();
+    let (db_service, db_handle) = DataService::new();
+
+    // 2. Inyectar los Handles solo donde se necesitan
+    let (fw_service, fw_handle) = FirmwareService::new(mqtt_handle.clone());
+    let (fsm_service, fsm_handle) = FsmService::new(db_handle.clone(), mqtt_handle.clone());
+
+    // 3. Spawnear las tareas
+    tokio::spawn(mqtt_service.run(shutdown.clone()));
+    tokio::spawn(db_service.run(shutdown.clone()));
+    */
 
     // ===================== CORE =====================
 
@@ -85,57 +95,81 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ===================== SERVICIOS =====================
 
-    let data_service_handle = tokio::spawn(DataService::new(
-        channels.data_service_to_core,
-        channels.data_service_from_core,
-        repo,
-    ).run(shutdown_token.clone()));
+    let data_service_handle = tokio::spawn(
+        DataService::new(
+            channels.data_service_to_core,
+            channels.data_service_from_core,
+            repo,
+        )
+        .run(shutdown_token.clone()),
+    );
 
-    let network_handle = tokio::spawn(NetworkService::new(
-        channels.network_service_to_core,
-        channels.network_service_from_core,
-        app_context.clone(),
-    ).run(shutdown_token.clone()));
+    let network_handle = tokio::spawn(
+        NetworkService::new(
+            channels.network_service_to_core,
+            channels.network_service_from_core,
+            app_context.clone(),
+        )
+        .run(shutdown_token.clone()),
+    );
 
-    let firmware_handle = tokio::spawn(FirmwareService::new(
-        channels.firmware_service_to_core,
-        channels.firmware_service_from_core,
-        app_context.clone(),
-    ).run(shutdown_token.clone()));
+    let firmware_handle = tokio::spawn(
+        FirmwareService::new(
+            channels.firmware_service_to_core,
+            channels.firmware_service_from_core,
+            app_context.clone(),
+        )
+        .run(shutdown_token.clone()),
+    );
 
-    let fsm_handle = tokio::spawn(FsmService::new(
-        channels.fsm_service_to_core,
-        channels.fsm_service_from_core,
-        app_context.clone(),
-    ).run(shutdown_token.clone()));
+    let fsm_handle = tokio::spawn(
+        FsmService::new(
+            channels.fsm_service_to_core,
+            channels.fsm_service_from_core,
+            app_context.clone(),
+        )
+        .run(shutdown_token.clone()),
+    );
 
-    let heartbeat_handle = tokio::spawn(HeartbeatService::new(
-        channels.heartbeat_service_to_core,
-        channels.heartbeat_service_from_core,
-    ).run(shutdown_token.clone()));
+    let heartbeat_handle = tokio::spawn(
+        HeartbeatService::new(
+            channels.heartbeat_service_to_core,
+            channels.heartbeat_service_from_core,
+        )
+        .run(shutdown_token.clone()),
+    );
 
-    let message_handle = tokio::spawn(MessageService::new(
-        channels.message_service_to_core,
-        channels.message_service_from_core,
-        app_context.clone(),
-    ).run(shutdown_token.clone()));
+    let message_handle = tokio::spawn(
+        MessageService::new(
+            channels.message_service_to_core,
+            channels.message_service_from_core,
+            app_context.clone(),
+        )
+        .run(shutdown_token.clone()),
+    );
 
-    let metrics_handle = tokio::spawn(MetricsService::new(
-        channels.metrics_service_to_core,
-        app_context.clone(),
-    ).run(shutdown_token.clone()));
+    let metrics_handle = tokio::spawn(
+        MetricsService::new(channels.metrics_service_to_core, app_context.clone())
+            .run(shutdown_token.clone()),
+    );
 
-    let grpc_handle = tokio::spawn(GrpcService::new(
-        channels.grpc_service_to_core,
-        channels.grpc_service_from_core,
-        app_context.clone(),
-    ).run(shutdown_token.clone()));
+    let grpc_handle = tokio::spawn(
+        GrpcService::new(
+            channels.grpc_service_to_core,
+            channels.grpc_service_from_core,
+            app_context.clone(),
+        )
+        .run(shutdown_token.clone()),
+    );
 
-    let mqtt_handle = tokio::spawn(MqttService::new(
-        channels.mqtt_service_to_core,
-        channels.mqtt_service_from_core,
-        app_context.clone(),
-    ).run(shutdown_token.clone()));
+    let mqtt_handle = tokio::spawn(
+        MqttService::new(
+            channels.mqtt_service_to_core,
+            channels.mqtt_service_from_core,
+            app_context.clone(),
+        )
+        .run(shutdown_token.clone()),
+    );
 
     let core_handle = tokio::spawn(core.run(shutdown_token.clone()));
 
@@ -153,8 +187,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         mqtt_handle,
         network_handle,
     ]
-        .into_iter()
-        .collect();
+    .into_iter()
+    .collect();
 
     tokio::select! {
         Some(res) = tasks.next() => {

@@ -1,318 +1,23 @@
-//! Dominio de Mensajería y Modelos de Datos.
+//! Módulo de Lógica de Mensajería y Enrutamiento (Router/Switchboard).
 //!
-//! Este módulo define las estructuras de datos fundamentales que se intercambian
-//! entre los distintos componentes del sistema (Hub, Edge, Servidor).
-//! Actúa como el lenguaje común para la serialización (MessagePack) y
-//! la persistencia en base de datos.
+//! Este módulo es el núcleo de comunicaciones del Edge Gateway. Actúa como un "Switchboard"
+//! o enrutador central que conecta los nodos físicos (Hubs vía MQTT) con la nube (Servidor vía gRPC),
+//! pasando por la máquina de estados local (FSM) y la persistencia de datos (DB).
 //!
-//! # Organización
+//! # Responsabilidades Principales
 //!
-//! - **Modelos Base:** Estructuras atómicas como `Metadata`, `DestinationType`.
-//! - **Payloads de Negocio:** Estructuras como `Measurement`, `Monitor`, `Alert`.
-//! - **Wrappers de Transporte:** Enums y Structs contenedores (`MessageFromHub`, `MessageToHub`)
-//!   que agrupan los payloads para su enrutamiento.
-//! - **Utilidades:** Funciones de casting para transformar modelos de memoria en filas de base de datos (`..._row`).
+//! - **Uplink Local (`msg_from_hub`):** Recibe telemetría MQTT (MessagePack), la deserializa y
+//!   decide si enviarla a la nube en tiempo real o a la base de datos si no hay conexión.
+//! - **Downlink Local (`msg_to_hub`):** Recibe comandos internos o remotos, los serializa a
+//!   MessagePack y los publica en el broker MQTT local hacia los Hubs.
+//! - **Uplink Remoto (`msg_to_server`):** Convierte los mensajes del dominio a estructuras Protobuf
+//!   y los transmite al servidor central a través de gRPC.
+//! - **Downlink Remoto (`msg_from_server`):** Recibe instrucciones gRPC de la nube, las traduce
+//!   al modelo de dominio y las distribuye a la FSM o a los Hubs.
 
-use crate::context::domain::AppContext;
-use crate::database::domain::TableDataVector;
-use crate::grpc::FromEdge;
-use crate::message::logic::{msg_from_hub, msg_from_server, msg_to_hub, msg_to_server};
-use crate::network::domain::HubRow;
-use crate::system::domain::InternalEvent;
-use chrono::Utc;
+use crate::database::domain::HubRow;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
-
-pub enum MessageServiceResponse {
-    EdgeUpload(FromEdge),
-    Serialized(SerializedMessage),
-    FromHub(HubMessage),
-    FromServer(ServerMessage),
-}
-
-pub enum MessageServiceCommand {
-    GenerateHelloWorld,
-    Internal(InternalEvent),
-    Batch(TableDataVector),
-    ToHub(HubMessage),
-    ToServer(ServerMessage),
-    GenerateLinkageAck(String),
-    GenerateEdgeState(String),
-    GenerateNetworkAck((String, u32)),
-}
-
-pub struct MessageService {
-    sender: mpsc::Sender<MessageServiceResponse>,
-    receiver: mpsc::Receiver<MessageServiceCommand>,
-    context: AppContext,
-}
-
-impl MessageService {
-    pub fn new(
-        sender: mpsc::Sender<MessageServiceResponse>,
-        receiver: mpsc::Receiver<MessageServiceCommand>,
-        context: AppContext,
-    ) -> Self {
-        Self {
-            sender,
-            receiver,
-            context,
-        }
-    }
-
-    pub async fn run(mut self, shutdown: CancellationToken) {
-        let (tx, mut rx) = mpsc::channel::<MessageServiceResponse>(100);
-        let (tx_to_msg_to_hub, rx_internal) = mpsc::channel::<InternalEvent>(100);
-        let (tx_command_to_hub, rx_command_to_hub) = mpsc::channel::<MessageServiceCommand>(100);
-        let (tx_command_from_hub, rx_command_from_hub) =
-            mpsc::channel::<MessageServiceCommand>(100);
-        let (tx_command_to_server, rx_command_to_server) =
-            mpsc::channel::<MessageServiceCommand>(100);
-        let (tx_server_to_msg_to_hub, rx_server_msg) = mpsc::channel::<ServerMessage>(100);
-        let (tx_from_hub_to_server, rx_from_hub) = mpsc::channel::<ServerMessage>(100);
-        let (tx_command_from_server, rx_command_from_server) =
-            mpsc::channel::<MessageServiceCommand>(100);
-
-        let tx_to_mqtt_local = tx.clone();
-        tokio::spawn(msg_to_hub(
-            tx_to_mqtt_local,
-            rx_internal,
-            rx_server_msg,
-            rx_command_to_hub,
-            self.context.clone(),
-            shutdown.clone(),
-        ));
-
-        let tx_response_from_hub = tx.clone();
-        tokio::spawn(msg_from_hub(
-            tx_response_from_hub,
-            tx_from_hub_to_server,
-            tx_to_msg_to_hub,
-            rx_command_from_hub,
-            self.context.clone(),
-            shutdown.clone(),
-        ));
-
-        let tx_to_server = tx.clone();
-        tokio::spawn(msg_to_server(
-            tx_to_server,
-            rx_from_hub,
-            rx_command_to_server,
-            self.context.clone(),
-            shutdown.clone(),
-        ));
-
-        let tx_from_server = tx.clone();
-        tokio::spawn(msg_from_server(
-            tx_from_server,
-            tx_server_to_msg_to_hub,
-            rx_command_from_server,
-            shutdown.clone(),
-        ));
-
-        loop {
-            tokio::select! {
-                _ = shutdown.cancelled() => {
-                    info!("shutdown recibido MessageService");
-                    break;
-                }
-
-                Some(cmd) = self.receiver.recv() => {
-                    match cmd {
-                        MessageServiceCommand::Internal(internal) => {
-                            match internal {
-                                InternalEvent::LocalDisconnected => {
-                                    if tx_command_from_hub.send(MessageServiceCommand::Internal(internal)).await.is_err() {
-                                        error!("no se pudo enviar el mensaje LocalDisconnected a msg_from_hub");
-                                    }
-                                },
-                                InternalEvent::LocalConnected => {
-                                    if tx_command_from_hub.send(MessageServiceCommand::Internal(internal)).await.is_err() {
-                                        error!("no se pudo enviar el mensaje LocalConnected a msg_from_hub");
-                                    }
-                                },
-                                InternalEvent::ServerConnected => {
-                                    if tx_command_from_hub.send(MessageServiceCommand::Internal(internal.clone())).await.is_err() {
-                                        error!("no se pudo enviar el mensaje ServerConnected a msg_from_hub");
-                                    }
-                                    if tx_command_to_server.send(MessageServiceCommand::Internal(internal)).await.is_err() {
-                                        error!("no se pudo enviar el mensaje ServerConnected a msg_to_server");
-                                    }
-                                },
-                                InternalEvent::ServerDisconnected => {
-                                    if tx_command_from_hub.send(MessageServiceCommand::Internal(internal.clone())).await.is_err() {
-                                        error!("no se pudo enviar el mensaje ServerDisconnected a msg_from_hub");
-                                    }
-                                    if tx_command_to_server.send(MessageServiceCommand::Internal(internal)).await.is_err() {
-                                        error!("no se pudo enviar el mensaje ServerDisconnected a msg_to_server");
-                                    }
-                                },
-                                InternalEvent::IncomingMessage(_) => {
-                                    if tx_command_from_hub.send(MessageServiceCommand::Internal(internal)).await.is_err() {
-                                        error!("no se pudo enviar el mensaje IncomingMessage a msg_from_hub");
-                                    }
-                                },
-                                InternalEvent::IncomingGrpc(_) => {
-                                    if tx_command_from_server.send(MessageServiceCommand::Internal(internal)).await.is_err() {
-                                        error!("no se pudo enviar el mensaje IncomingGrpc a msg_from_server");
-                                    }
-                                }
-                            }
-                        },
-                        MessageServiceCommand::ToHub(to_hub) => {
-                            match to_hub {
-                                HubMessage::HandshakeToHub(_) => {
-                                    if tx_command_to_hub.send(MessageServiceCommand::ToHub(to_hub)).await.is_err() {
-                                        error!("no se pudo enviar mensaje a msg_to_hub");
-                                    }
-                                },
-                                HubMessage::StateToHub(_) => {
-                                    if tx_command_to_hub.send(MessageServiceCommand::ToHub(to_hub)).await.is_err() {
-                                        error!("no se pudo enviar mensaje a msg_to_hub");
-                                    }
-                                },
-                                HubMessage::PhaseNotification(_) => {
-                                    if tx_command_to_hub.send(MessageServiceCommand::ToHub(to_hub)).await.is_err() {
-                                        error!("no se pudo enviar mensaje a msg_to_hub");
-                                    }
-                                },
-                                HubMessage::Heartbeat(_) => {
-                                    if tx_command_to_hub.send(MessageServiceCommand::ToHub(to_hub)).await.is_err() {
-                                        error!("no se pudo enviar mensaje a msg_to_hub");
-                                    }
-                                },
-                                HubMessage::UpdateFirmwareRequest(_) => {
-                                    if tx_command_to_hub.send(MessageServiceCommand::ToHub(to_hub)).await.is_err() {
-                                        error!("no se pudo enviar mensaje a msg_to_hub");
-                                    }
-                                },
-                                HubMessage::FromServerSettings(_) => {
-                                    if tx_command_to_hub.send(MessageServiceCommand::ToHub(to_hub)).await.is_err() {
-                                        error!("no se pudo enviar mensaje a msg_to_hub");
-                                    }
-                                },
-                                HubMessage::FromServerSettingsAck(_) => {
-                                    if tx_command_to_hub.send(MessageServiceCommand::ToHub(to_hub)).await.is_err() {
-                                        error!("no se pudo enviar mensaje a msg_to_hub");
-                                    }
-                                },
-                                HubMessage::DeleteHub(_) => {
-                                    if tx_command_to_hub.send(MessageServiceCommand::ToHub(to_hub)).await.is_err() {
-                                        error!("no se pudo enviar mensaje a msg_to_hub");
-                                    }
-                                },
-                                HubMessage::ActiveHub(_) => {
-                                    if tx_command_to_hub.send(MessageServiceCommand::ToHub(to_hub)).await.is_err() {
-                                        error!("no se pudo enviar mensaje a msg_to_hub");
-                                    }
-                                },
-                                HubMessage::LinkageAck(_) => {
-                                    if tx_command_to_hub.send(MessageServiceCommand::ToHub(to_hub)).await.is_err() {
-                                        error!("no se pudo enviar mensaje a msg_to_hub");
-                                    }
-                                },
-                                _ => {}
-                            }
-                        },
-                        MessageServiceCommand::Batch(batch) => {
-                            if tx_command_to_server.send(MessageServiceCommand::Batch(batch)).await.is_err() {
-                                error!("no se pudo enviar batch a msg_to_server");
-                            }
-                        },
-                        MessageServiceCommand::ToServer(to_server) => {
-                            match to_server {
-                                ServerMessage::FromHubSettings(hub_settings) => {
-                                    if tx_command_to_server.send(MessageServiceCommand::ToServer(ServerMessage::FromHubSettings(hub_settings))).await.is_err() {
-                                        error!("no se pudo enviar mensaje a msg_to_server");
-                                    }
-                                },
-                                ServerMessage::FromHubSettingsAck(hub_settings_ack) => {
-                                    if tx_command_to_server.send(MessageServiceCommand::ToServer(ServerMessage::FromHubSettingsAck(hub_settings_ack))).await.is_err() {
-                                        error!("no se pudo enviar mensaje a msg_to_server");
-                                    }
-                                },
-                                ServerMessage::FirmwareOutcome(firmware_outcome) => {
-                                    if tx_command_to_server.send(MessageServiceCommand::ToServer(ServerMessage::FirmwareOutcome(firmware_outcome))).await.is_err() {
-                                        error!("no se pudo enviar mensaje a msg_to_server");
-                                    }
-                                },
-                                ServerMessage::FirmwareOutcomeError(firmware_outcome_error) => {
-                                    if tx_command_to_server.send(MessageServiceCommand::ToServer(ServerMessage::FirmwareOutcomeError(firmware_outcome_error))).await.is_err() {
-                                        error!("no se pudo enviar mensaje FirmwareOutcomeError a msg_to_server");
-                                    }
-                                },
-                                ServerMessage::Report(report) => {
-                                    if tx_command_to_server.send(MessageServiceCommand::ToServer(ServerMessage::Report(report))).await.is_err() {
-                                        error!("no se pudo enviar mensaje a msg_to_server");
-                                    }
-                                },
-                                ServerMessage::Monitor(monitor) => {
-                                    if tx_command_to_server.send(MessageServiceCommand::ToServer(ServerMessage::Monitor(monitor))).await.is_err() {
-                                        error!("no se pudo enviar mensaje a msg_to_server");
-                                    }
-                                },
-                                ServerMessage::AlertAir(alert_air) => {
-                                    if tx_command_to_server.send(MessageServiceCommand::ToServer(ServerMessage::AlertAir(alert_air))).await.is_err() {
-                                        error!("no se pudo enviar mensaje a msg_to_server");
-                                    }
-                                },
-                                ServerMessage::AlertTem(alert_tem) => {
-                                    if tx_command_to_server.send(MessageServiceCommand::ToServer(ServerMessage::AlertTem(alert_tem))).await.is_err() {
-                                        error!("no se pudo enviar mensaje a msg_to_server");
-                                    }
-                                },
-                                ServerMessage::Metrics(metrics) => {
-                                    if tx_command_to_server.send(MessageServiceCommand::ToServer(ServerMessage::Metrics(metrics))).await.is_err() {
-                                        error!("no se pudo enviar mensaje a msg_to_server");
-                                    }
-                                },
-                                _ => {}
-                            }
-                        },
-                        MessageServiceCommand::GenerateHelloWorld => {
-                            if tx_command_to_server.send(cmd).await.is_err() {
-                                error!("no se pudo enviar GenerateHelloWorld a msg_to_server");
-                            }
-                        },
-                        MessageServiceCommand::GenerateLinkageAck(hub) => {
-                            let metadata = Metadata {
-                                sender_user_id: self.context.system.id_edge.clone(),
-                                destination_id: hub,
-                                timestamp: Utc::now().timestamp(),
-                            };
-                            let msg = LinkageAck {
-                                metadata,
-                                linkage_ack: true,
-                            };
-                            if tx_command_to_hub.send(MessageServiceCommand::ToHub(HubMessage::LinkageAck(msg))).await.is_err() {
-                                error!("no se pudo enviar mensaje a msg_to_hub");
-                            }
-                        },
-                        MessageServiceCommand::GenerateEdgeState(state) => {
-                            if tx_command_to_server.send(MessageServiceCommand::GenerateEdgeState(state)).await.is_err() {
-                                error!("no se pudo enviar GenerateEdgeState a msg_to_server");
-                            }
-                        },
-                        MessageServiceCommand::GenerateNetworkAck(code) => {
-                            if tx_command_to_server.send(MessageServiceCommand::GenerateNetworkAck(code)).await.is_err() {
-                                error!("no se pudo enviar GenerateNetworkAck a msg_to_server");
-                            }
-                        }
-                    }
-                }
-
-                Some(cmd) = rx.recv() => {
-                    if self.sender.send(cmd).await.is_err() {
-                        error!("no se pudo enviar mensaje MessageServiceResponse desde MessageService");
-                    }
-                }
-            }
-        }
-    }
-}
 
 /// Metadatos estándar para todos los mensajes del sistema.
 ///
@@ -431,9 +136,7 @@ pub struct NetworkAck {
     pub code_of_ack: u32,
 }
 
-/// Configuración remota para un dispositivo (Hub/Nodo).
-///
-/// Contiene credenciales WiFi/MQTT y parámetros operativos.
+/// Configuración remota para un dispositivo Hub.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Settings {
     #[serde(rename = "m")]
@@ -526,7 +229,7 @@ pub struct PhaseNotification {
     pub jitter: u32,
 }
 
-/// Mensaje de latido (Heartbeat) para indicar a los Hubs que el Edge está vivo.
+/// Mensaje de latido para indicar a los Hubs que el Edge está vivo.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Heartbeat {
     #[serde(rename = "m")]
@@ -573,7 +276,7 @@ pub struct ActiveHub {
 
 /// Confirmación de recepción de configuración (Handshake bidireccional).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SettingOk {
+pub struct SettingsAck {
     #[serde(rename = "m")]
     pub metadata: Metadata,
     #[serde(rename = "i")]
@@ -584,18 +287,21 @@ pub struct SettingOk {
     pub handshake: bool,
 }
 
+// Server -> aca
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct UpdateFirmware {
+pub struct UpdateHubFirmware {
     pub metadata: Metadata,
     pub network: String,
 }
 
+// Server -> aca
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UpdateEdgeFirmware {
     pub metadata: Metadata,
     pub version: String,
 }
 
+// aca -> Hub
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UpdateFirmwareRequestHub {
     #[serde(rename = "m")]
@@ -607,7 +313,7 @@ pub struct UpdateFirmwareRequestHub {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub struct FirmwareOk {
+pub struct FirmwareHubAck {
     #[serde(rename = "m")]
     pub metadata: Metadata,
     #[serde(rename = "u")]
@@ -617,16 +323,10 @@ pub struct FirmwareOk {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct FirmwareOutcome {
+pub struct FirmwareHubResult {
     pub metadata: Metadata,
     pub network: String,
     pub percentage_ok: f32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct FirmwareOutcomeError {
-    pub metadata: Metadata,
-    pub network: String,
     pub error: String,
 }
 
@@ -709,57 +409,27 @@ pub enum HubMessage {
     AlertAir(AlertAir),
     AlertTem(AlertTh),
     HandshakeFromHub(HandshakeFromHub),
-    FirmwareOk(FirmwareOk),
+    FirmwareOk(FirmwareHubAck),
     FromHubSettings(Settings),
-    FromHubSettingsAck(SettingOk),
+    FromHubSettingsAck(SettingsAck),
     EmptyQueue(EmptyQueue),
     EmptyQueueSafe(EmptyQueueSafeMode),
     LinkageRequest(LinkageRequest),
     HubState(HubState),
-
-    // Mensajes para el Hub
-    UpdateFirmwareRequest(UpdateFirmwareRequestHub),
-    FromServerSettings(Settings),
-    FromServerSettingsAck(SettingOk),
-    DeleteHub(DeleteHub),
-    ActiveHub(ActiveHub),
-    Heartbeat(Heartbeat),
-    HandshakeToHub(HandshakeToHub),
-    PhaseNotification(PhaseNotification),
-    StateToHub(StateToHub),
-    LinkageAck(LinkageAck),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum ServerMessage {
     // Mensajes provenientes del Server
-    UpdateFirmware(UpdateFirmware),
+    UpdateFirmware(UpdateHubFirmware),
     UpdateEdgeFirmware(UpdateEdgeFirmware),
     DeleteHub(DeleteHub),
     FromServerSettings(Settings),
-    FromServerSettingsAck(SettingOk),
+    FromServerSettingsAck(SettingsAck),
     Network(Network),
     Heartbeat(Heartbeat),
-
-    // Mensajes para el Server
-    FirmwareOutcome(FirmwareOutcome),
-    FirmwareOutcomeError(FirmwareOutcomeError),
-    HelloWorld(HelloWorld), // y proveniente del server tambien
-    FromHubSettings(Settings),
-    FromHubSettingsAck(SettingOk),
-    Report(Measurement),
-    Monitor(Monitor),
-    AlertAir(AlertAir),
-    AlertTem(AlertTh),
-    Metrics(SystemMetrics),
-    ReportBatch(Vec<Measurement>),
-    MonitorBatch(Vec<Monitor>),
-    AlertAirBatch(Vec<AlertAir>),
-    AlertTemBatch(Vec<AlertTh>),
-    EdgePeriodic(EdgeState),
-    NetworkAck(NetworkAck),
-    HubState(HubState),
+    HelloWorld(HelloWorld), // ?
 }
 
 /// Estado de conexión con el servidor remoto.

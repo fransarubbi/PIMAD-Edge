@@ -1,6 +1,6 @@
-use sqlx::{Executor, QueryBuilder, Sqlite, SqlitePool};
 use crate::database::repository::pop_batch_generic;
 use crate::message::domain::Monitor;
+use sqlx::{Executor, QueryBuilder, Sqlite, SqlitePool};
 
 /// Crea la tabla `monitor` en la base de datos si aún no existe.
 ///
@@ -28,7 +28,7 @@ use crate::message::domain::Monitor;
 /// - Se asume que el nombre de la tabla es estable y conocido por el sistema.
 ///
 
-pub async fn create_table_monitor(pool: &SqlitePool) -> Result<(), sqlx::Error>  {
+pub async fn create_table_monitor(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     pool.execute(
         r#"
         CREATE TABLE IF NOT EXISTS monitor (
@@ -42,13 +42,12 @@ pub async fn create_table_monitor(pool: &SqlitePool) -> Result<(), sqlx::Error> 
             heap_largest_block   INTEGER NOT NULL,
             uptime_sec           INTEGER NOT NULL
         );
-        "#
+        "#,
     )
-        .await?;
+    .await?;
 
     Ok(())
 }
-
 
 /// Inserta un lote (*batch*) de mediciones en la tabla `monitor`.
 ///
@@ -87,10 +86,7 @@ pub async fn create_table_monitor(pool: &SqlitePool) -> Result<(), sqlx::Error> 
 ///   (controlados por `BATCH_SIZE` en capas superiores).
 ///
 
-pub async fn insert_monitor(pool: &SqlitePool,
-                            data_vec: &Vec<Monitor>
-                            ) -> Result<(), sqlx::Error> {
-
+pub async fn insert_monitor(pool: &SqlitePool, data_vec: &Vec<Monitor>) -> Result<(), sqlx::Error> {
     if data_vec.is_empty() {
         return Ok(());
     }
@@ -99,7 +95,7 @@ pub async fn insert_monitor(pool: &SqlitePool,
         "INSERT INTO monitor (
             sender_user_id, destination_id, timestamp, network_id,
             heap_free, heap_min_free, heap_largest_block, uptime_sec
-        ) "
+        ) ",
     );
 
     query_builder.push_values(data_vec, |mut b, data| {
@@ -118,7 +114,6 @@ pub async fn insert_monitor(pool: &SqlitePool,
 
     Ok(())
 }
-
 
 /// Extrae y elimina un lote de mediciones de la tabla `monitor`.
 ///
@@ -153,4 +148,3 @@ pub async fn insert_monitor(pool: &SqlitePool,
 pub async fn pop_batch_monitor(pool: &SqlitePool) -> Result<Vec<Monitor>, sqlx::Error> {
     pop_batch_generic(pool, "monitor").await
 }
-

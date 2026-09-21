@@ -10,15 +10,24 @@
 //! 1. Mensajes de red (actualizaciones de topología).
 //! 2. Cargas útiles (payloads) que deben ser publicadas en el broker.
 
-
+use crate::context::domain::AppContext;
+use crate::message::logic::SerializedMessage;
+use crate::mqtt::logic::mqtt;
+use crate::system::domain::InternalEvent;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
-use crate::context::domain::AppContext;
-use crate::message::domain::SerializedMessage;
-use crate::mqtt::logic::mqtt;
-use crate::system::domain::InternalEvent;
 
+#[derive(Clone)]
+pub struct MqttHandle {
+    tx: mpsc::Sender<MqttServiceCommand>,
+}
+
+impl MqttHandle {
+    pub async fn send_serialized(&self, data: SerializedMessage) {
+        let _ = self.tx.send(MqttServiceCommand::Serialized(data)).await;
+    }
+}
 
 /// Comandos de control aceptados por el servicio MQTT.
 ///
@@ -34,7 +43,6 @@ pub enum MqttServiceCommand {
     NetworksUpdated,
 }
 
-
 /// Actor supervisor del cliente MQTT.
 ///
 /// Mantiene los canales de comunicación hacia y desde el `Core` y posee el contexto
@@ -46,25 +54,25 @@ pub struct MqttService {
     /// Canal por donde se reciben comandos (`MqttServiceCommand`) provenientes del Core.
     receiver: mpsc::Receiver<MqttServiceCommand>,
     /// Contexto global compartido de la aplicación.
-    context: AppContext
+    context: AppContext,
 }
 
-
 impl MqttService {
-
     /// Crea una nueva instancia del supervisor MQTT.
     ///
     /// # Argumentos
     /// * `sender` - Extremo de transmisión hacia el bus central del Core.
     /// * `receiver` - Extremo de recepción para escuchar comandos del Core.
     /// * `context` - Estado global (configuraciones, base de datos, gestor de red).
-    pub fn new(sender: mpsc::Sender<InternalEvent>,
-               receiver: mpsc::Receiver<MqttServiceCommand>,
-               context: AppContext) -> Self {
+    pub fn new(
+        sender: mpsc::Sender<InternalEvent>,
+        receiver: mpsc::Receiver<MqttServiceCommand>,
+        context: AppContext,
+    ) -> Self {
         Self {
             sender,
             receiver,
-            context
+            context,
         }
     }
 
@@ -77,12 +85,17 @@ impl MqttService {
     /// # Argumentos
     /// * `shutdown` - Token utilizado para detener de forma segura el bucle y la tarea hija.
     pub async fn run(mut self, shutdown: CancellationToken) {
-
         let (tx, mut rx_response) = mpsc::channel::<InternalEvent>(100);
         let (tx_command, rx_msg) = mpsc::channel::<SerializedMessage>(100);
         let (tx_command_net, rx_net) = mpsc::channel::<MqttServiceCommand>(100);
 
-        tokio::spawn(mqtt(tx, rx_msg, rx_net, self.context.clone(), shutdown.clone()));
+        tokio::spawn(mqtt(
+            tx,
+            rx_msg,
+            rx_net,
+            self.context.clone(),
+            shutdown.clone(),
+        ));
 
         loop {
             tokio::select! {
@@ -119,7 +132,6 @@ impl MqttService {
     }
 }
 
-
 /// Estructura de Transporte de Datos MQTT (DTO).
 ///
 /// Agrupa una carga útil binaria bruta junto con su tópico de destino o procedencia.
@@ -132,15 +144,9 @@ pub struct PayloadTopic {
     pub topic: String,
 }
 
-
 impl PayloadTopic {
-
     /// Construye una nueva instancia de `PayloadTopic`.
     pub fn new(payload: Vec<u8>, topic: String) -> Self {
-        Self { 
-            payload, 
-            topic 
-        }
+        Self { payload, topic }
     }
 }
-

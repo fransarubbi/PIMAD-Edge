@@ -114,7 +114,7 @@ pub async fn insert_measurement(
     let mut query_builder: QueryBuilder<Sqlite> = QueryBuilder::new(
         "INSERT INTO measurement (
             sender_user_id, destination_id, timestamp,
-            network_id, pulse_counter, temperature, 
+            network_id, pulse_counter, temperature,
             humidity, air_quality, sample
         ) ",
     );

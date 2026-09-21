@@ -20,23 +20,32 @@
 //! Requiere Autenticación Mutua TLS (mTLS). El cliente presenta sus propios certificados
 //! (`CRT_EDGE_GRPC`, `KEY_EDGE_GRPC`) y valida al servidor mediante una CA compartida (`CA_EDGE_GRPC`).
 
-
-use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
-use tonic::codec::CompressionEncoding;
-use tonic::Request;
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
-use tokio_stream::StreamExt;
-use std::fs;
-use tracing::{error, info, instrument, warn};
-use std::time::Duration;
-use tokio_util::sync::CancellationToken;
-use crate::context::domain::AppContext;
-use crate::grpc::{ToEdge, FromEdge};
-use crate::grpc::edge_service_client::EdgeServiceClient;
-use crate::system::domain::{InternalEvent, ErrorType};
 use crate::config::grpc_service::*;
+use crate::context::domain::AppContext;
+use crate::grpc::edge_service_client::EdgeServiceClient;
+use crate::grpc::{FromEdge, ToEdge};
+use crate::system::domain::{ErrorType, InternalEvent};
+use std::fs;
+use std::time::Duration;
+use tokio::sync::mpsc;
+use tokio_stream::StreamExt;
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::sync::CancellationToken;
+use tonic::Request;
+use tonic::codec::CompressionEncoding;
+use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
+use tracing::{error, info, instrument, warn};
 
+#[derive(Clone)]
+pub struct GrpcHandle {
+    tx: mpsc::Sender<FromEdge>,
+}
+
+impl GrpcHandle {
+    pub async fn send_serialized(&self, data: FromEdge) {
+        let _ = self.tx.send(data).await;
+    }
+}
 
 /// Servicio administrador de la conexión gRPC.
 ///
@@ -51,15 +60,15 @@ pub struct GrpcService {
     context: AppContext,
 }
 
-
 impl GrpcService {
-
     /// Crea una nueva instancia de `GrpcService`.
     ///
     /// No inicia la conexión. Se debe llamar a `run()` explícitamente.
-    pub fn new(sender: mpsc::Sender<InternalEvent>,
-               receiver: mpsc::Receiver<FromEdge>,
-               context: AppContext) -> Self {
+    pub fn new(
+        sender: mpsc::Sender<InternalEvent>,
+        receiver: mpsc::Receiver<FromEdge>,
+        context: AppContext,
+    ) -> Self {
         Self {
             sender,
             receiver,
@@ -74,12 +83,11 @@ impl GrpcService {
     /// 3. Entra en un select que escucha apagados del sistema y redirige el tráfico
     ///    bidireccional entre la app y el demonio gRPC.
     pub async fn run(mut self, shutdown: CancellationToken) {
-
         let (tx_to_core, mut rx_from_grpc) = mpsc::channel::<InternalEvent>(50);
         let (tx, rx) = mpsc::channel::<FromEdge>(50);
 
         tokio::spawn(grpc(tx_to_core, rx, self.context.clone(), shutdown.clone()));
-        
+
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => {
@@ -92,7 +100,7 @@ impl GrpcService {
                         error!("no se pudo enviar EdgeUpload a remote_grpc");
                     }
                 }
-                
+
                 Some(response) = rx_from_grpc.recv() => {
                     if self.sender.send(response).await.is_err() {
                         error!("no se pudo enviar InternalEvent desde remote_grpc");
@@ -102,7 +110,6 @@ impl GrpcService {
         }
     }
 }
-
 
 /// Estados posibles de la máquina de estados del cliente gRPC.
 #[derive(Debug)]
@@ -120,19 +127,24 @@ enum StateClient {
     Error,
 }
 
-
 /// Crea y configura un canal HTTP/2 (Transporte subyacente de gRPC) con cifrado mTLS.
 ///
 /// # Errores
 /// Retorna `ErrorType::Generic` si no puede leer los certificados físicos.
 /// Retorna `ErrorType::Endpoint` si la URL es inválida o la conexión inicial falla.
 async fn create_tls_channel(system: &crate::system::domain::System) -> Result<Channel, ErrorType> {
-    let ca_pem = fs::read(CA_EDGE_GRPC)
-        .map_err(|e| { error!("fallo leyendo CA gRPC: {}", e); ErrorType::Generic })?;
-    let cert_pem = fs::read(CRT_EDGE_GRPC)
-        .map_err(|e| { error!("fallo leyendo Cert gRPC: {}", e); ErrorType::Generic })?;
-    let key_pem = fs::read(KEY_EDGE_GRPC)
-        .map_err(|e| { error!("fallo leyendo Key gRPC: {}", e); ErrorType::Generic })?;
+    let ca_pem = fs::read(CA_EDGE_GRPC).map_err(|e| {
+        error!("fallo leyendo CA gRPC: {}", e);
+        ErrorType::Generic
+    })?;
+    let cert_pem = fs::read(CRT_EDGE_GRPC).map_err(|e| {
+        error!("fallo leyendo Cert gRPC: {}", e);
+        ErrorType::Generic
+    })?;
+    let key_pem = fs::read(KEY_EDGE_GRPC).map_err(|e| {
+        error!("fallo leyendo Key gRPC: {}", e);
+        ErrorType::Generic
+    })?;
 
     let ca = Certificate::from_pem(ca_pem);
     let identity = Identity::from_pem(cert_pem, key_pem);
@@ -159,7 +171,6 @@ async fn create_tls_channel(system: &crate::system::domain::System) -> Result<Ch
     })
 }
 
-
 /// Motor asíncrono que gobierna la conexión gRPC mediante una máquina de estados finitos.
 ///
 /// Se encarga de:
@@ -168,11 +179,12 @@ async fn create_tls_channel(system: &crate::system::domain::System) -> Result<Ch
 /// - Leer del stream para enviar al canal local (Downstream).
 /// - Ejecutar el retroceso (delay) de 5 segundos al producirse fallos.
 #[instrument(name = "grpc", skip_all)]
-async fn grpc(tx: mpsc::Sender<InternalEvent>,
-              mut rx_outbound: mpsc::Receiver<FromEdge>,
-              app_context: AppContext,
-              shutdown: CancellationToken) {
-
+async fn grpc(
+    tx: mpsc::Sender<InternalEvent>,
+    mut rx_outbound: mpsc::Receiver<FromEdge>,
+    app_context: AppContext,
+    shutdown: CancellationToken,
+) {
     let mut state = StateClient::Init;
 
     loop {
@@ -221,7 +233,10 @@ async fn grpc(tx: mpsc::Sender<InternalEvent>,
                     }
                 }
             }
-            StateClient::Work { tx_session, inbound_stream } => {
+            StateClient::Work {
+                tx_session,
+                inbound_stream,
+            } => {
                 tokio::select! {
                     _ = shutdown.cancelled() => {
                         info!("shutdown recibido gRPC (Work)");

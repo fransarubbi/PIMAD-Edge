@@ -19,7 +19,7 @@
 
 use crate::context::domain::AppContext;
 use crate::database::domain::DataServiceCommand;
-use crate::message::domain::{HubMessage, ServerMessage};
+use crate::message::logic::{HubMessage, ServerMessage};
 use crate::network::logic::{network_admin, network_dba};
 use crate::system::domain::System;
 use serde::{Deserialize, Serialize};
@@ -308,53 +308,6 @@ impl NetworkManager {
             total_hubs += total
         }
         total_hubs
-    }
-
-    /// Resuelve el tópico MQTT específico de salida basándose en el tipo de mensaje a enviar al Hub.
-    pub fn get_topic_to_send_msg_to_hub(&self, msg: &HubMessage) -> Option<Topic> {
-        match msg {
-            HubMessage::UpdateFirmwareRequest(firmware) => {
-                let id_net = firmware.network.clone();
-                if let Some(n) = self.networks.get(&id_net) {
-                    Some(n.topic_new_firmware.clone())
-                } else {
-                    None
-                }
-            }
-            HubMessage::FromServerSettings(settings) => {
-                let id_net = settings.network.clone();
-                if let Some(n) = self.networks.get(&id_net) {
-                    Some(n.topic_new_setting.clone())
-                } else {
-                    None
-                }
-            }
-            HubMessage::FromServerSettingsAck(settings_ack) => {
-                let id_net = settings_ack.network.clone();
-                if let Some(n) = self.networks.get(&id_net) {
-                    Some(n.topic_setting_ok.clone())
-                } else {
-                    None
-                }
-            }
-            HubMessage::DeleteHub(delete_hub) => {
-                let id_net = delete_hub.network.clone();
-                if let Some(n) = self.networks.get(&id_net) {
-                    Some(n.topic_delete_hub.clone())
-                } else {
-                    None
-                }
-            }
-            HubMessage::ActiveHub(active_hub) => {
-                let id_net = active_hub.network.clone();
-                if let Some(n) = self.networks.get(&id_net) {
-                    Some(n.topic_active_hub.clone())
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
     }
 }
 

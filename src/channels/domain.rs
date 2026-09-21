@@ -18,18 +18,16 @@
 //! Los canales se agrupan en pares bidireccionales por cada subsistema (excepto métricas,
 //! que es unidireccional por naturaleza).
 
-
-use tokio::sync::mpsc;
-use tracing::info;
 use crate::database::domain::{DataServiceCommand, DataServiceResponse};
 use crate::firmware::domain::{FirmwareServiceCommand, FirmwareServiceResponse};
 use crate::fsm::domain::{FsmServiceCommand, FsmServiceResponse};
 use crate::grpc::FromEdge;
-use crate::message::domain::{MessageServiceCommand, MessageServiceResponse, ServerMessage};
+use crate::message::logic::{MessageServiceCommand, MessageServiceResponse, ServerMessage};
 use crate::mqtt::domain::MqttServiceCommand;
 use crate::network::domain::{NetworkServiceCommand, NetworkServiceResponse};
 use crate::system::domain::InternalEvent;
-
+use tokio::sync::mpsc;
+use tracing::info;
 
 /// Contenedor maestro de todos los canales MPSC del sistema.
 ///
@@ -88,12 +86,10 @@ pub struct Channels {
     pub core_from_network_service: mpsc::Receiver<NetworkServiceResponse>,
 
     pub core_to_network_service: mpsc::Sender<NetworkServiceCommand>,
-    pub network_service_from_core: mpsc::Receiver<NetworkServiceCommand>
+    pub network_service_from_core: mpsc::Receiver<NetworkServiceCommand>,
 }
 
-
 impl Channels {
-
     /// Inicializa y enlaza todos los canales requeridos por el sistema.
     ///
     /// Esta función agrupa la creación repetitiva de canales MPSC, asegurando que todos
@@ -109,7 +105,6 @@ impl Channels {
     /// # Retorno
     /// Retorna una instancia completa de `Channels` con todos los extremos conectados.
     pub fn new(buffer_size: usize) -> Self {
-
         info!("creando canales del sistema");
 
         // 1. Data Service

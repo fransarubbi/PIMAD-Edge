@@ -15,39 +15,87 @@
 //!
 
 use crate::context::domain::AppContext;
+use crate::database::domain::DataHandle;
 use crate::fsm::logic::{
     edge_state, handle_events_and_actions, heartbeat_generator, heartbeat_generator_timer, run_fsm,
 };
-use crate::message::domain::HubMessage;
+use crate::message::{
+    domain::{EmptyQueue, EmptyQueueSafeMode, HandshakeFromHub},
+    logic::MessageHandle,
+};
+use crate::system::domain::InternalEvent;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument};
 
-pub enum FsmServiceResponse {
-    NewEpoch(u32),
-    GetEpoch,
-    ToHub(HubMessage),
-    EdgeState(String),
+#[derive(Clone)]
+pub struct FsmHandle {
+    tx: mpsc::Sender<InternalFsmCommand>,
 }
 
-pub enum FsmServiceCommand {
-    ErrorEpoch,
-    Epoch(u32),
-    FromHub(HubMessage),
-    CreateRuntime,
-    DeleteRuntime,
-    LocalDisconnected,
-    LocalConnected,
+impl FsmHandle {
+    pub async fn handshake(&self, data: HandshakeFromHub) {
+        let cmd = InternalFsmCommand::Handshake { data };
+        let _ = self.tx.send(cmd).await;
+    }
+    pub async fn queue(&self, data: EmptyQueue) {
+        let cmd = InternalFsmCommand::Queue { data };
+        let _ = self.tx.send(cmd).await;
+    }
+    pub async fn queue_safe(&self, data: EmptyQueueSafeMode) {
+        let cmd = InternalFsmCommand::QueueSafe { data };
+        let _ = self.tx.send(cmd).await;
+    }
+    pub async fn connection_event(&self, data: InternalEvent) {
+        let cmd = InternalFsmCommand::ConnectionEvent { data };
+        let _ = self.tx.send(cmd).await;
+    }
+    pub async fn create_runtime(&self) -> bool {
+        let (response_tx, response_rx) = oneshot::channel();
+        let cmd = InternalFsmCommand::CreateRuntime {
+            respond_to: response_tx,
+        };
+        if self.tx.send(cmd).await.is_err() {
+            return false;
+        }
+        match response_rx.await {
+            Ok(_) => true,
+            Err(_) => false,
+        }
+    }
+    pub async fn delete_runtime(&self) -> bool {
+        let (response_tx, response_rx) = oneshot::channel();
+        let cmd = InternalFsmCommand::DeleteRuntime {
+            respond_to: response_tx,
+        };
+        if self.tx.send(cmd).await.is_err() {
+            return false;
+        }
+        match response_rx.await {
+            Ok(_) => true,
+            Err(_) => false,
+        }
+    }
+}
+
+enum InternalFsmCommand {
+    Handshake { data: HandshakeFromHub },
+    Queue { data: EmptyQueue },
+    QueueSafe { data: EmptyQueueSafeMode },
+    ConnectionEvent { data: InternalEvent },
+    CreateRuntime { respond_to: oneshot::Sender<bool> },
+    DeleteRuntime { respond_to: oneshot::Sender<bool> },
 }
 
 pub struct FsmService {
-    sender: mpsc::Sender<FsmServiceResponse>,
-    receiver: mpsc::Receiver<FsmServiceCommand>,
+    rx: mpsc::Receiver<InternalFsmCommand>,
     context: AppContext,
+    message_handle: MessageHandle,
+    db_handle: DataHandle,
 }
 
 struct FsmRuntime {
@@ -60,15 +108,19 @@ struct FsmRuntime {
 
 impl FsmService {
     pub fn new(
-        sender: mpsc::Sender<FsmServiceResponse>,
-        receiver: mpsc::Receiver<FsmServiceCommand>,
         context: AppContext,
-    ) -> Self {
-        Self {
-            sender,
-            receiver,
+        message_handle: MessageHandle,
+        db_handle: DataHandle,
+    ) -> (Self, FsmHandle) {
+        let (tx, rx) = mpsc::channel(10);
+        let service = Self {
+            rx,
             context,
-        }
+            message_handle,
+            db_handle,
+        };
+        let handle = FsmHandle { tx };
+        (service, handle)
     }
 
     fn spawn_runtime(&self) -> FsmRuntime {

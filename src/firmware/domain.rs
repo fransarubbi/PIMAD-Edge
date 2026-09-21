@@ -1,39 +1,119 @@
-//! # Módulo de Dominio de Firmware (FSM)
-//!
-//! Este módulo implementa la lógica de negocio pura para el proceso de actualización
-//! OTA (Over-The-Air) utilizando una Máquina de Estados Finitos (FSM).
-//!
-//! ## Responsabilidades
-//! * Definir los estados válidos del proceso de actualización.
-//! * Calcular transiciones deterministas basadas en eventos.
-//! * Generar acciones (efectos secundarios) que el orquestador debe ejecutar.
-//! * Gestionar la sesión de actualización (métricas y progreso).
-
 use crate::context::domain::AppContext;
+use crate::firmware::logic::CommandToHubOta;
 use crate::firmware::logic::{edge_ota, hub_ota};
-use crate::message::domain::{
-    FirmwareOk, HubMessage, ServerMessage, UpdateEdgeFirmware, UpdateFirmware,
-};
+use crate::message::domain::{FirmwareHubAck, UpdateEdgeFirmware, UpdateFirmwareRequestHub};
+use crate::message::logic::MessageHandle;
 use tokio::{
     sync::mpsc,
-    task::JoinHandle,
     time::{Duration, sleep},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument};
 
-pub enum FirmwareServiceCommand {
-    UpdateHub(UpdateFirmware),
-    HubResponse(FirmwareOk),
-    CreateRuntime,
-    DeleteRuntime,
-    UpdateEdge(UpdateEdgeFirmware),
+enum InternalFirmwareCommand {
+    UpdateHub { data: UpdateFirmwareRequestHub },
+    AckFromHub { data: FirmwareHubAck },
+    UpdateEdge { data: UpdateEdgeFirmware },
 }
 
-pub enum FirmwareServiceResponse {
-    ServerAck(ServerMessage),
-    HubCommand(HubMessage),
-    EdgeUpdated(ServerMessage),
+#[derive(Clone)]
+pub struct FirmwareHandle {
+    tx: mpsc::Sender<InternalFirmwareCommand>,
+}
+
+impl FirmwareHandle {
+    pub async fn update_hubs(&self, data: UpdateFirmwareRequestHub) {
+        let cmd = InternalFirmwareCommand::UpdateHub { data };
+        let _ = self.tx.send(cmd).await;
+    }
+    pub async fn ack_from_hub(&self, data: FirmwareHubAck) {
+        let cmd = InternalFirmwareCommand::AckFromHub { data };
+        let _ = self.tx.send(cmd).await;
+    }
+    pub async fn update_edge(&self, data: UpdateEdgeFirmware) {
+        let cmd = InternalFirmwareCommand::UpdateEdge { data };
+        let _ = self.tx.send(cmd).await;
+    }
+}
+
+pub struct FirmwareService {
+    rx: mpsc::Receiver<InternalFirmwareCommand>,
+    context: AppContext,
+    message_handle: MessageHandle,
+}
+
+impl FirmwareService {
+    pub fn new(context: AppContext, message_handle: MessageHandle) -> (Self, FirmwareHandle) {
+        let (tx, rx) = mpsc::channel(10);
+        let service = Self {
+            rx,
+            context,
+            message_handle,
+        };
+        let handle = FirmwareHandle { tx };
+        (service, handle)
+    }
+
+    pub async fn run(mut self, shutdown: CancellationToken) {
+        let token = CancellationToken::new();
+
+        let (tx_to_timer, rx_from_update_task) = mpsc::channel::<Event>(10);
+        let (tx_to_update, rx_from_timer) = mpsc::channel::<Event>(10);
+        let (tx_msg, rx_msg) = mpsc::channel::<CommandToHubOta>(10);
+        let (tx_msg_edge, rx_cmd_edge) = mpsc::channel::<UpdateEdgeFirmware>(10);
+
+        let child_token = token.child_token();
+        tokio::spawn(hub_ota(
+            tx_to_timer,
+            rx_msg,
+            rx_from_timer,
+            self.context.clone(),
+            self.message_handle.clone(),
+            child_token,
+        ));
+
+        tokio::spawn(edge_ota(
+            rx_cmd_edge,
+            self.message_handle.clone(),
+            self.context.clone(),
+        ));
+
+        let child_token = token.child_token();
+        tokio::spawn(firmware_watchdog_timer(
+            tx_to_update,
+            rx_from_update_task,
+            child_token,
+        ));
+
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => {
+                    info!("shutdown recibido FirmwareService");
+                    break;
+                }
+
+                Some(cmd) = self.rx.recv() => {
+                    match cmd {
+                        InternalFirmwareCommand::UpdateHub { data } => {
+                            if tx_msg.send(CommandToHubOta::Request(data)).await.is_err() {
+                                error!("no se pudo enviar comando Update a update_firmware_task");
+                            }
+                        }
+                        InternalFirmwareCommand::AckFromHub { data } => {
+                            if tx_msg.send(CommandToHubOta::Response(data)).await.is_err() {
+                                error!("no se pudo enviar mensaje HubResponse a update_firmware_task");
+                            }
+                        }
+                        InternalFirmwareCommand::UpdateEdge { data } => {
+                            if tx_msg_edge.send(data).await.is_err() {
+                                error!("no se pudo enviar comando Update a update_firmware_task");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 pub enum Event {
@@ -42,149 +122,6 @@ pub enum Event {
     /// Comando interno para detener el timer.
     StopTimer,
     Timeout,
-}
-
-pub struct FirmwareService {
-    sender: mpsc::Sender<FirmwareServiceResponse>,
-    receiver: mpsc::Receiver<FirmwareServiceCommand>,
-    context: AppContext,
-}
-
-struct FirmwareRuntime {
-    handles: Vec<JoinHandle<()>>,
-    cancel_token: CancellationToken,
-    tx_msg: mpsc::Sender<FirmwareServiceCommand>,
-    tx_msg_edge: mpsc::Sender<FirmwareServiceCommand>,
-    rx_response: mpsc::Receiver<FirmwareServiceResponse>,
-}
-
-impl FirmwareService {
-    pub fn new(
-        sender: mpsc::Sender<FirmwareServiceResponse>,
-        receiver: mpsc::Receiver<FirmwareServiceCommand>,
-        context: AppContext,
-    ) -> Self {
-        Self {
-            sender,
-            receiver,
-            context,
-        }
-    }
-
-    fn spawn_runtime(&self) -> FirmwareRuntime {
-        let token = CancellationToken::new();
-        let mut handles = Vec::new();
-
-        let (tx_response, rx_response) = mpsc::channel::<FirmwareServiceResponse>(10);
-        let (tx_to_timer, rx_from_update_task) = mpsc::channel::<Event>(10);
-        let (tx_to_update, rx_from_timer) = mpsc::channel::<Event>(10);
-        let (tx_msg, rx_msg) = mpsc::channel::<FirmwareServiceCommand>(10);
-        let (tx_msg_edge, rx_cmd_edge) = mpsc::channel::<FirmwareServiceCommand>(10);
-
-        let child_token = token.child_token();
-        let tx = tx_response.clone();
-        handles.push(tokio::spawn(hub_ota(
-            tx,
-            tx_to_timer,
-            rx_msg,
-            rx_from_timer,
-            self.context.clone(),
-            child_token,
-        )));
-
-        let tx = tx_response.clone();
-        tokio::spawn(edge_ota(tx, rx_cmd_edge, self.context.clone()));
-
-        let child_token = token.child_token();
-        handles.push(tokio::spawn(firmware_watchdog_timer(
-            tx_to_update,
-            rx_from_update_task,
-            child_token,
-        )));
-
-        FirmwareRuntime {
-            handles,
-            cancel_token: token,
-            tx_msg,
-            tx_msg_edge,
-            rx_response,
-        }
-    }
-
-    pub async fn run(mut self, shutdown: CancellationToken) {
-        let mut runtime: Option<FirmwareRuntime> = None;
-
-        loop {
-            match runtime {
-                Some(ref mut rt) => {
-                    tokio::select! {
-                        _ = shutdown.cancelled() => {
-                            info!("shutdown recibido FirmwareService");
-                            if let Some(rt) = runtime.take() {
-                                rt.cancel_token.cancel();
-                                for h in rt.handles {
-                                    let _ = tokio::time::timeout(Duration::from_secs(2), h).await;
-                                }
-                            }
-                            break;
-                        }
-                        Some(cmd) = self.receiver.recv() => {
-                            match cmd {
-                                FirmwareServiceCommand::UpdateHub(update) => {
-                                    if rt.tx_msg.send(FirmwareServiceCommand::UpdateHub(update)).await.is_err() {
-                                        error!("no se pudo enviar comando Update a update_firmware_task");
-                                    }
-                                },
-                                FirmwareServiceCommand::HubResponse(response) => {
-                                    if rt.tx_msg.send(FirmwareServiceCommand::HubResponse(response)).await.is_err() {
-                                        error!("no se pudo enviar mensaje HubResponse a update_firmware_task");
-                                    }
-                                },
-                                FirmwareServiceCommand::DeleteRuntime => {
-                                    if let Some(rt) = runtime.take() {
-                                        rt.cancel_token.cancel();
-                                        for h in rt.handles {
-                                            let _ = tokio::time::timeout(Duration::from_secs(2), h).await;
-                                        }
-                                    }
-                                },
-                                FirmwareServiceCommand::UpdateEdge(update) => {
-                                    if rt.tx_msg_edge.send(FirmwareServiceCommand::UpdateEdge(update)).await.is_err() {
-                                        error!("no se pudo enviar comando Update a update_firmware_task");
-                                    }
-                                },
-                                _ => {}
-                            }
-                        }
-                        Some(response) = rt.rx_response.recv() => {
-                            if self.sender.send(response).await.is_err() {
-                                error!("no se pudo enviar FirmwareServiceResponse al Core");
-                            }
-                        }
-                    }
-                }
-                None => {
-                    tokio::select! {
-                        _ = shutdown.cancelled() => {
-                            info!("shutdown recibido FirmwareService");
-                            break;
-                        }
-
-                        Some(cmd) = self.receiver.recv() => {
-                            match cmd {
-                                FirmwareServiceCommand::CreateRuntime => {
-                                    if runtime.is_none() {
-                                        runtime = Some(self.spawn_runtime());
-                                    }
-                                },
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
 }
 
 /// Tarea asíncrona dedicada al temporizador de seguridad (Watchdog).

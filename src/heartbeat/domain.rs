@@ -17,33 +17,28 @@
 //! 3. **NotHeartbeatYet:** Se perdió un latido (advertencia).
 //! 4. **DeadServer:** Se agotó el tiempo de espera máximo (desconexión confirmada).
 
-
+use crate::heartbeat::logic::{heartbeat, run_fsm_heartbeat};
+use crate::message::logc::{ServrMesage};
+use crate::system::domain::InternalEvent;
 use tokio::sync::mpsc;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument};
-use crate::heartbeat::logic::{heartbeat, run_fsm_heartbeat};
-use crate::message::domain::{ServerMessage};
-use crate::system::domain::InternalEvent;
-
 
 pub struct HeartbeatService {
     sender: mpsc::Sender<InternalEvent>,
     receiver: mpsc::Receiver<ServerMessage>,
 }
 
-
 impl HeartbeatService {
-    pub fn new(sender: mpsc::Sender<InternalEvent>,
-               receiver: mpsc::Receiver<ServerMessage>) -> Self {
-        Self {
-            sender,
-            receiver,
-        }
+    pub fn new(
+        sender: mpsc::Sender<InternalEvent>,
+        receiver: mpsc::Receiver<ServerMessage>,
+    ) -> Self {
+        Self { sender, receiver }
     }
 
     pub async fn run(mut self, shutdown: CancellationToken) {
-
         let (tx_to_core, mut rx) = mpsc::channel::<InternalEvent>(50);
         let (tx_to_fsm, rx_from_heartbeat) = mpsc::channel::<Event>(50);
         let (tx_to_timer, rx_watchdog_heartbeat) = mpsc::channel::<Event>(50);
@@ -51,21 +46,27 @@ impl HeartbeatService {
         let (tx_actions, rx_fsm) = mpsc::channel::<Vec<Action>>(50);
 
         let heartbeat_tx_to_fsm = tx_to_fsm.clone();
-        tokio::spawn(heartbeat(tx_to_core,
-                               heartbeat_tx_to_fsm,
-                               tx_to_timer,
-                               rx_from_server,
-                               rx_fsm,
-                               shutdown.clone()));
+        tokio::spawn(heartbeat(
+            tx_to_core,
+            heartbeat_tx_to_fsm,
+            tx_to_timer,
+            rx_from_server,
+            rx_fsm,
+            shutdown.clone(),
+        ));
 
-        tokio::spawn(run_fsm_heartbeat(tx_actions,
-                                       rx_from_heartbeat,
-                                       shutdown.clone()));
+        tokio::spawn(run_fsm_heartbeat(
+            tx_actions,
+            rx_from_heartbeat,
+            shutdown.clone(),
+        ));
 
         let watchdog_tx_to_fsm = tx_to_fsm.clone();
-        tokio::spawn(watchdog_timer_for_heartbeat(watchdog_tx_to_fsm,
-                                                  rx_watchdog_heartbeat,
-                                                  shutdown.clone()));
+        tokio::spawn(watchdog_timer_for_heartbeat(
+            watchdog_tx_to_fsm,
+            rx_watchdog_heartbeat,
+            shutdown.clone(),
+        ));
 
         loop {
             tokio::select! {
@@ -89,7 +90,6 @@ impl HeartbeatService {
     }
 }
 
-
 /// Estructura principal que mantiene el estado de la FSM del Heartbeat.
 #[derive(Debug, Clone)]
 pub struct FsmHeartbeat {
@@ -100,7 +100,6 @@ pub struct FsmHeartbeat {
     /// Estado de conexión actual calculado.
     status: Status,
 }
-
 
 /// Estados internos de la máquina de estados.
 /// Determinan la salud de la recepción de heartbeats.
@@ -116,14 +115,12 @@ pub enum State {
     NotHeartbeatYet,
 }
 
-
 /// Estado de la conexión
 #[derive(Debug, Clone, PartialEq)]
 pub enum Status {
     Disconnected,
     Connected,
 }
-
 
 /// Eventos que alimentan a la FSM y provocan transiciones.
 pub enum Event {
@@ -136,7 +133,6 @@ pub enum Event {
     /// Comando interno para detener el temporizador.
     StopTimer,
 }
-
 
 /// Acciones o Efectos Secundarios (Side Effects).
 /// Instrucciones que la FSM genera para que el Runtime las ejecute.
@@ -153,14 +149,12 @@ pub enum Action {
     StopTimer,
 }
 
-
 /// Resultado de una transición válida.
 /// Contiene el nuevo estado de la FSM y las acciones a ejecutar.
 pub struct TransitionValid {
     change_state: FsmHeartbeat,
     action: Vec<Action>,
 }
-
 
 impl TransitionValid {
     pub fn get_change_state(&self) -> FsmHeartbeat {
@@ -171,12 +165,10 @@ impl TransitionValid {
     }
 }
 
-
 /// Resultado de una transición inválida (error de lógica o evento inesperado).
 pub struct TransitionInvalid {
     invalid: String,
 }
-
 
 impl TransitionInvalid {
     pub fn get_invalid(&self) -> &str {
@@ -184,15 +176,12 @@ impl TransitionInvalid {
     }
 }
 
-
 pub enum Transition {
     Valid(TransitionValid),
     Invalid(TransitionInvalid),
 }
 
-
 impl FsmHeartbeat {
-
     /// Crea una nueva instancia de la FSM en estado inicial desconectado.
     pub fn new() -> Self {
         Self {
@@ -209,27 +198,27 @@ impl FsmHeartbeat {
             (State::StartingWait, Event::Heartbeat) => {
                 let next_fsm = self.clone();
                 state_starting_wait_event_heartbeat(next_fsm)
-            },
+            }
             (State::StartingWait, Event::Timeout) => {
                 let next_fsm = self.clone();
                 state_starting_wait_event_timeout(next_fsm)
-            },
+            }
             (State::ItsAlive, Event::Heartbeat) => {
                 let next_fsm = self.clone();
                 state_its_alive_event_heartbeat(next_fsm)
-            },
+            }
             (State::ItsAlive, Event::Timeout) => {
                 let next_fsm = self.clone();
                 state_its_alive_event_timeout(next_fsm)
-            },
+            }
             (State::NotHeartbeatYet, Event::Heartbeat) => {
                 let next_fsm = self.clone();
                 state_not_heartbeat_yet_event_heartbeat(next_fsm)
-            },
+            }
             (State::NotHeartbeatYet, Event::Timeout) => {
                 let next_fsm = self.clone();
                 state_not_heartbeat_yet_event_timeout(next_fsm)
-            },
+            }
             (State::DeadServer, Event::Heartbeat) => {
                 let next_fsm = self.clone();
                 state_dead_server_event_heartbeat(next_fsm)
@@ -252,12 +241,11 @@ impl FsmHeartbeat {
                     valid.action.push(entry_action);
                 }
                 Transition::Valid(valid)
-            },
+            }
             invalid => invalid,
         }
     }
 }
-
 
 // --- Funciones de Transición Específicas ---
 
@@ -270,12 +258,13 @@ fn state_starting_wait_event_heartbeat(mut next_fsm: FsmHeartbeat) -> Transition
     next_fsm.status = Status::Connected;
     let valid = TransitionValid {
         change_state: next_fsm.clone(),
-        action: vec![Action::SendStatusConditional(old_status, next_fsm.status),   // (Disconnected, Connected)
-                     Action::StopTimer],
+        action: vec![
+            Action::SendStatusConditional(old_status, next_fsm.status), // (Disconnected, Connected)
+            Action::StopTimer,
+        ],
     };
     Transition::Valid(valid)
 }
-
 
 /// Transición: StartingWait + Timeout -> NotHeartbeatYet.
 /// Primer fallo al esperar.
@@ -288,7 +277,6 @@ fn state_starting_wait_event_timeout(mut next_fsm: FsmHeartbeat) -> Transition {
     Transition::Valid(valid)
 }
 
-
 /// Transición: ItsAlive + Heartbeat -> StartingWait.
 /// Reinicia el ciclo de espera tras recibir un latido válido.
 fn state_its_alive_event_heartbeat(mut next_fsm: FsmHeartbeat) -> Transition {
@@ -299,7 +287,6 @@ fn state_its_alive_event_heartbeat(mut next_fsm: FsmHeartbeat) -> Transition {
     };
     Transition::Valid(valid)
 }
-
 
 /// Transición: ItsAlive + Timeout -> NotHeartbeatYet.
 /// El servidor estaba vivo, pero se agotó el tiempo esperando el siguiente latido.
@@ -312,7 +299,6 @@ fn state_its_alive_event_timeout(mut next_fsm: FsmHeartbeat) -> Transition {
     Transition::Valid(valid)
 }
 
-
 /// Transición: NotHeartbeatYet + Heartbeat -> StartingWait.
 /// Recuperación exitosa antes de declarar muerte total.
 fn state_not_heartbeat_yet_event_heartbeat(mut next_fsm: FsmHeartbeat) -> Transition {
@@ -324,7 +310,6 @@ fn state_not_heartbeat_yet_event_heartbeat(mut next_fsm: FsmHeartbeat) -> Transi
     Transition::Valid(valid)
 }
 
-
 /// Transición: NotHeartbeatYet + Timeout -> DeadServer.
 /// Fallo definitivo. Se marca el servidor como desconectado.
 fn state_not_heartbeat_yet_event_timeout(mut next_fsm: FsmHeartbeat) -> Transition {
@@ -334,11 +319,10 @@ fn state_not_heartbeat_yet_event_timeout(mut next_fsm: FsmHeartbeat) -> Transiti
     next_fsm.status = Status::Disconnected;
     let valid = TransitionValid {
         change_state: next_fsm.clone(),
-        action: vec![Action::SendStatusConditional(old_status, next_fsm.status)],  // (Connected, Disconnected)
+        action: vec![Action::SendStatusConditional(old_status, next_fsm.status)], // (Connected, Disconnected)
     };
     Transition::Valid(valid)
 }
-
 
 /// Transición: DeadServer + Heartbeat -> StartingWait.
 /// El servidor revivió tras haber estado muerto.
@@ -351,7 +335,6 @@ fn state_dead_server_event_heartbeat(mut next_fsm: FsmHeartbeat) -> Transition {
     Transition::Valid(valid)
 }
 
-
 /// Helper para generar una transición inválida genérica.
 fn invalid() -> Transition {
     let invalid = TransitionInvalid {
@@ -359,7 +342,6 @@ fn invalid() -> Transition {
     };
     Transition::Invalid(invalid)
 }
-
 
 /// Calcula la acción `OnEntry` comparando el estado anterior y el nuevo.
 /// Si el estado cambia, genera la acción para inicializar los recursos del nuevo estado.
@@ -371,7 +353,6 @@ fn compute_on_entry(old: &FsmHeartbeat, new: &FsmHeartbeat) -> Action {
     Action::Nothing
 }
 
-
 /// Tarea asíncrona del Temporizador de Vigilancia (Watchdog).
 ///
 /// Gestiona la espera. Si no recibe un comando `StopTimer` o una reinicialización antes
@@ -381,14 +362,16 @@ fn compute_on_entry(old: &FsmHeartbeat, new: &FsmHeartbeat) -> Action {
 /// * `tx_to_fsm`: Canal para notificar el Timeout a la FSM.
 /// * `cmd_rx`: Canal para recibir órdenes (`InitTimer`, `StopTimer`).
 #[instrument(name = "watchdog_timer_for_heartbeat", skip_all)]
-pub async fn watchdog_timer_for_heartbeat(tx_to_fsm: mpsc::Sender<Event>,
-                                          mut cmd_rx: mpsc::Receiver<Event>,
-                                          shutdown: CancellationToken) {
+pub async fn watchdog_timer_for_heartbeat(
+    tx_to_fsm: mpsc::Sender<Event>,
+    mut cmd_rx: mpsc::Receiver<Event>,
+    shutdown: CancellationToken,
+) {
     loop {
         let duration = match cmd_rx.recv().await {
             Some(Event::InitTimer(d)) => d,
             Some(Event::StopTimer) => continue, // Si ya estaba parado, ignorar
-            None => break, // Canal cerrado, terminar tarea
+            None => break,                      // Canal cerrado, terminar tarea
             _ => continue,
         };
 
@@ -407,8 +390,6 @@ pub async fn watchdog_timer_for_heartbeat(tx_to_fsm: mpsc::Sender<Event>,
         }
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -449,8 +430,10 @@ mod tests {
                 assert_eq!(new_fsm.old_status, Status::Connected);
 
                 // Debe enviar status condicional
-                assert!(contains_action(&actions,
-                                        &Action::SendStatusConditional(Status::Disconnected, Status::Connected)));
+                assert!(contains_action(
+                    &actions,
+                    &Action::SendStatusConditional(Status::Disconnected, Status::Connected)
+                ));
 
                 // Debe detener el timer
                 assert!(contains_action(&actions, &Action::StopTimer));
@@ -459,7 +442,7 @@ mod tests {
                 assert!(contains_action(&actions, &Action::OnEntry(State::ItsAlive)));
 
                 assert_eq!(actions.len(), 3);
-            },
+            }
             _ => panic!("Se esperaba una transicion valida"),
         }
     }
@@ -478,9 +461,12 @@ mod tests {
                 assert_eq!(new_fsm.status, Status::Disconnected);
 
                 // Solo debe tener OnEntry
-                assert!(contains_action(&actions, &Action::OnEntry(State::NotHeartbeatYet)));
+                assert!(contains_action(
+                    &actions,
+                    &Action::OnEntry(State::NotHeartbeatYet)
+                ));
                 assert_eq!(actions.len(), 1);
-            },
+            }
             _ => panic!("Se esperaba una transicion valida"),
         }
     }
@@ -493,7 +479,7 @@ mod tests {
         match transition {
             Transition::Invalid(invalid) => {
                 assert_eq!(invalid.get_invalid(), "Invalid state");
-            },
+            }
             _ => panic!("Expected invalid transition"),
         }
     }
@@ -506,7 +492,7 @@ mod tests {
         match transition {
             Transition::Invalid(invalid) => {
                 assert_eq!(invalid.get_invalid(), "Invalid state");
-            },
+            }
             _ => panic!("Se esperaba una transicion invalida"),
         }
     }
@@ -536,10 +522,13 @@ mod tests {
                 assert!(contains_action(&actions, &Action::StopTimer));
 
                 // Debe tener OnEntry
-                assert!(contains_action(&actions, &Action::OnEntry(State::StartingWait)));
+                assert!(contains_action(
+                    &actions,
+                    &Action::OnEntry(State::StartingWait)
+                ));
 
                 assert_eq!(actions.len(), 2);
-            },
+            }
             _ => panic!("Se esperaba una transicion valida"),
         }
     }
@@ -561,9 +550,12 @@ mod tests {
                 assert_eq!(new_fsm.status, Status::Connected);
 
                 // Solo OnEntry
-                assert!(contains_action(&actions, &Action::OnEntry(State::NotHeartbeatYet)));
+                assert!(contains_action(
+                    &actions,
+                    &Action::OnEntry(State::NotHeartbeatYet)
+                ));
                 assert_eq!(actions.len(), 1);
-            },
+            }
             _ => panic!("Se esperaba una transicion valida"),
         }
     }
@@ -576,7 +568,7 @@ mod tests {
         let transition = fsm.step(Event::InitTimer(Duration::from_secs(1)));
 
         match transition {
-            Transition::Invalid(_) => {},
+            Transition::Invalid(_) => {}
             _ => panic!("Se esperaba una transicion invalida"),
         }
     }
@@ -589,7 +581,7 @@ mod tests {
         let transition = fsm.step(Event::StopTimer);
 
         match transition {
-            Transition::Invalid(_) => {},
+            Transition::Invalid(_) => {}
             _ => panic!("Se esperaba una transicion invalida"),
         }
     }
@@ -617,10 +609,13 @@ mod tests {
                 assert!(contains_action(&actions, &Action::StopTimer));
 
                 // Debe tener OnEntry
-                assert!(contains_action(&actions, &Action::OnEntry(State::StartingWait)));
+                assert!(contains_action(
+                    &actions,
+                    &Action::OnEntry(State::StartingWait)
+                ));
 
                 assert_eq!(actions.len(), 2);
-            },
+            }
             _ => panic!("Se esperaba una transicion valida"),
         }
     }
@@ -644,14 +639,19 @@ mod tests {
                 assert_eq!(new_fsm.old_status, Status::Disconnected);
 
                 // Debe enviar cambio de estado
-                assert!(contains_action(&actions,
-                                        &Action::SendStatusConditional(Status::Connected, Status::Disconnected)));
+                assert!(contains_action(
+                    &actions,
+                    &Action::SendStatusConditional(Status::Connected, Status::Disconnected)
+                ));
 
                 // Debe tener OnEntry
-                assert!(contains_action(&actions, &Action::OnEntry(State::DeadServer)));
+                assert!(contains_action(
+                    &actions,
+                    &Action::OnEntry(State::DeadServer)
+                ));
 
                 assert_eq!(actions.len(), 2);
-            },
+            }
             _ => panic!("Se esperaba una transicion valida"),
         }
     }
@@ -670,11 +670,13 @@ mod tests {
                 let actions = valid.get_actions();
 
                 // Debe enviar status condicional aunque sea igual
-                assert!(contains_action(&actions,
-                                        &Action::SendStatusConditional(Status::Disconnected, Status::Disconnected)));
+                assert!(contains_action(
+                    &actions,
+                    &Action::SendStatusConditional(Status::Disconnected, Status::Disconnected)
+                ));
 
                 assert_eq!(actions.len(), 2);
-            },
+            }
             _ => panic!("Se esperaba una transicion valida"),
         }
     }
@@ -687,7 +689,7 @@ mod tests {
         let transition = fsm.step(Event::InitTimer(Duration::from_secs(1)));
 
         match transition {
-            Transition::Invalid(_) => {},
+            Transition::Invalid(_) => {}
             _ => panic!("Se esperaba una transicion invalida"),
         }
     }
@@ -700,7 +702,7 @@ mod tests {
         let transition = fsm.step(Event::StopTimer);
 
         match transition {
-            Transition::Invalid(_) => {},
+            Transition::Invalid(_) => {}
             _ => panic!("Se esperaba una transicion invalida"),
         }
     }
@@ -725,9 +727,12 @@ mod tests {
                 assert_eq!(new_fsm.state, State::StartingWait);
 
                 // Solo OnEntry
-                assert!(contains_action(&actions, &Action::OnEntry(State::StartingWait)));
+                assert!(contains_action(
+                    &actions,
+                    &Action::OnEntry(State::StartingWait)
+                ));
                 assert_eq!(actions.len(), 1);
-            },
+            }
             _ => panic!("Se esperaba una transicion valida"),
         }
     }
@@ -740,7 +745,7 @@ mod tests {
         let transition = fsm.step(Event::Timeout);
 
         match transition {
-            Transition::Invalid(_) => {},
+            Transition::Invalid(_) => {}
             _ => panic!("Se esperaba una transicion invalida"),
         }
     }
@@ -753,7 +758,7 @@ mod tests {
         let transition = fsm.step(Event::InitTimer(Duration::from_secs(1)));
 
         match transition {
-            Transition::Invalid(_) => {},
+            Transition::Invalid(_) => {}
             _ => panic!("Se esperaba una transicion invalida"),
         }
     }
@@ -766,7 +771,7 @@ mod tests {
         let transition = fsm.step(Event::StopTimer);
 
         match transition {
-            Transition::Invalid(_) => {},
+            Transition::Invalid(_) => {}
             _ => panic!("Se esperaba una transicion invalida"),
         }
     }
@@ -786,7 +791,7 @@ mod tests {
                 fsm = valid.get_change_state();
                 assert_eq!(fsm.state, State::ItsAlive);
                 assert_eq!(fsm.status, Status::Connected);
-            },
+            }
             _ => panic!("Se esperaba una transicion valida"),
         }
 
@@ -797,7 +802,7 @@ mod tests {
                 fsm = valid.get_change_state();
                 assert_eq!(fsm.state, State::StartingWait);
                 assert_eq!(fsm.status, Status::Connected);
-            },
+            }
             _ => panic!("Se esperaba una transicion valida"),
         }
     }
@@ -812,7 +817,7 @@ mod tests {
             Transition::Valid(valid) => {
                 fsm = valid.get_change_state();
                 assert_eq!(fsm.state, State::NotHeartbeatYet);
-            },
+            }
             _ => panic!("Se esperaba una transicion valida"),
         }
 
@@ -823,7 +828,7 @@ mod tests {
                 fsm = valid.get_change_state();
                 assert_eq!(fsm.state, State::DeadServer);
                 assert_eq!(fsm.status, Status::Disconnected);
-            },
+            }
             _ => panic!("Se esperaba una transicion valida"),
         }
     }
@@ -840,7 +845,7 @@ mod tests {
             Transition::Valid(valid) => {
                 fsm = valid.get_change_state();
                 assert_eq!(fsm.state, State::StartingWait);
-            },
+            }
             _ => panic!("Se esperaba una transicion valida"),
         }
 
@@ -855,9 +860,11 @@ mod tests {
                 assert_eq!(fsm.status, Status::Connected);
 
                 // Debe notificar cambio de estado
-                assert!(contains_action(&actions,
-                                        &Action::SendStatusConditional(Status::Disconnected, Status::Connected)));
-            },
+                assert!(contains_action(
+                    &actions,
+                    &Action::SendStatusConditional(Status::Disconnected, Status::Connected)
+                ));
+            }
             _ => panic!("Se esperaba una transicion valida"),
         }
     }
@@ -871,7 +878,7 @@ mod tests {
         match transition {
             Transition::Valid(valid) => {
                 fsm = valid.get_change_state();
-            },
+            }
             _ => panic!("Se esperaba una transicion valida"),
         }
 
@@ -884,7 +891,7 @@ mod tests {
 
                 assert_eq!(fsm.state, State::StartingWait);
                 assert!(contains_action(&actions, &Action::StopTimer));
-            },
+            }
             _ => panic!("Se esperaba una transicion valida"),
         }
     }
@@ -913,9 +920,11 @@ mod tests {
                 assert_eq!(fsm.status, Status::Disconnected);
 
                 // Debe notificar cambio
-                assert!(contains_action(&actions,
-                                        &Action::SendStatusConditional(Status::Connected, Status::Disconnected)));
-            },
+                assert!(contains_action(
+                    &actions,
+                    &Action::SendStatusConditional(Status::Connected, Status::Disconnected)
+                ));
+            }
             _ => panic!("Se esperaba una transicion valida"),
         }
     }
@@ -995,11 +1004,14 @@ mod tests {
         });
 
         // Iniciar timer
-        tx_cmd.send(Event::InitTimer(Duration::from_millis(50))).await.unwrap();
+        tx_cmd
+            .send(Event::InitTimer(Duration::from_millis(50)))
+            .await
+            .unwrap();
 
         // Esperar timeout
         match tokio::time::timeout(Duration::from_millis(200), rx_from_timer.recv()).await {
-            Ok(Some(Event::Timeout)) => {},
+            Ok(Some(Event::Timeout)) => {}
             _ => panic!("Se esperaba timeout"),
         }
     }
@@ -1015,7 +1027,10 @@ mod tests {
         });
 
         // Iniciar timer
-        tx_cmd.send(Event::InitTimer(Duration::from_millis(200))).await.unwrap();
+        tx_cmd
+            .send(Event::InitTimer(Duration::from_millis(200)))
+            .await
+            .unwrap();
 
         // Cancelar
         sleep(Duration::from_millis(10)).await;
@@ -1023,7 +1038,7 @@ mod tests {
 
         // No debe recibir timeout
         match tokio::time::timeout(Duration::from_millis(300), rx_from_timer.recv()).await {
-            Err(_) => {},
+            Err(_) => {}
             Ok(_) => panic!("No se deberia poder recibir eventos despues de cancelar"),
         }
     }
@@ -1039,9 +1054,12 @@ mod tests {
         });
 
         for _ in 0..3 {
-            tx_cmd.send(Event::InitTimer(Duration::from_millis(50))).await.unwrap();
+            tx_cmd
+                .send(Event::InitTimer(Duration::from_millis(50)))
+                .await
+                .unwrap();
             match tokio::time::timeout(Duration::from_millis(100), rx_from_timer.recv()).await {
-                Ok(Some(Event::Timeout)) => {},
+                Ok(Some(Event::Timeout)) => {}
                 _ => panic!("Se esperaba timeout"),
             }
         }
@@ -1061,7 +1079,10 @@ mod tests {
         tx_cmd.send(Event::StopTimer).await.unwrap();
 
         // Luego iniciar normalmente
-        tx_cmd.send(Event::InitTimer(Duration::from_millis(50))).await.unwrap();
+        tx_cmd
+            .send(Event::InitTimer(Duration::from_millis(50)))
+            .await
+            .unwrap();
 
         // Debe funcionar normalmente
         sleep(Duration::from_millis(100)).await;
@@ -1097,7 +1118,9 @@ mod tests {
         fn unwrap_valid(self) -> TransitionValid {
             match self {
                 Transition::Valid(v) => v,
-                Transition::Invalid(i) => panic!("Se esperaba una transicion valida: {}", i.get_invalid()),
+                Transition::Invalid(i) => {
+                    panic!("Se esperaba una transicion valida: {}", i.get_invalid())
+                }
             }
         }
     }

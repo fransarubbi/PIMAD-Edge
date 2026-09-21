@@ -346,6 +346,11 @@ impl Core {
                             if self.core_to_message_service.send(MessageServiceCommand::ToHub(hub_msg)).await.is_err() {
                                 error!("no se pudo enviar HubCommand desde Core");
                             }
+                        },
+                        FirmwareServiceResponse::EdgeUpdated(updated) => {
+                            if self.core_to_message_service.send(MessageServiceCommand::ToServer(updated)).await.is_err() {
+                                error!("no se pudo enviar UpdateEdgeFirmware desde Core");
+                            }
                         }
                     }
                 }
@@ -446,7 +451,7 @@ impl Core {
                         MessageServiceResponse::FromServer(from_server) => {
                             match from_server {
                                 ServerMessage::UpdateFirmware(update) => {
-                                    if self.core_to_firmware_service.send(FirmwareServiceCommand::Update(update)).await.is_err() {
+                                    if self.core_to_firmware_service.send(FirmwareServiceCommand::UpdateHub(update)).await.is_err() {
                                         error!("no se pudo enviar UpdateFirmware desde Core");
                                     }
                                 },
@@ -475,6 +480,11 @@ impl Core {
                                         error!("no se pudo enviar Heartbeat desde Core");
                                     }
                                 },
+                                ServerMessage::UpdateEdgeFirmware(update) => {
+                                    if self.core_to_firmware_service.send(FirmwareServiceCommand::UpdateEdge(update)).await.is_err() {
+                                        error!("no se pudo enviar UpdateEdge desde Core");
+                                    }
+                                }
                                 _ => {}
                             }
                         },

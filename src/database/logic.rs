@@ -1,411 +1,145 @@
-//! Módulo de orquestación de base de datos y persistencia.
-//!
-//! Este módulo implementa el patrón **"Store and Forward"** (Almacenar y Reenviar)
-//! para garantizar la integridad de los datos cuando se pierde la conexión con el servidor exterior,
-//! y gestiona las operaciones CRUD de la configuración local.
-//!
-//! # Arquitectura
-//!
-//! El sistema utiliza un modelo de actores basado en tareas asíncronas de Tokio, las cuales
-//! se comunican mediante canales `mpsc` y comparten acceso a la base de datos a través de `Repository`.
-//! Se divide en tres tareas principales:
-//!
-//! 1.  **[`dba_insert_task`]:** El consumidor de escritura. Agrupa los datos de telemetría en memoria
-//!     y realiza inserciones por lotes (*Batch Insert*). También maneja la inserción/actualización de configuración.
-//! 2.  **[`dba_remove_task`]:** El consumidor de borrado. Gestiona la eliminación de entidades (Redes, Hubs)
-//!     y notifica al sistema sobre los cambios.
-//! 3.  **[`dba_get_task`]:** El productor de lectura y retransmisor. Extrae datos almacenados
-//!     y los inyecta en el flujo de envío al servidor cuando se recupera la conexión. También sirve consultas de estado.
-//!
-//! # Apagado Seguro (Graceful Shutdown)
-//!
-//! Todas las tareas monitorean un `CancellationToken` para interrumpir sus bucles principales
-//! y finalizar de manera limpia cuando el sistema se apaga.
-
-
-use tokio::sync::{mpsc};
-use tokio::time::{interval, MissedTickBehavior};
-use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, instrument};
-use crate::config::sqlite::{FLUSH_INTERVAL};
-use crate::message::domain::{HubMessage, ServerStatus};
-use super::domain::{DataCommandDelete, DataCommandGet, DataCommandInsert, DataServiceResponse, TableDataVector};
+use super::domain::{AllNetworksResult, HubRow, NetworkResult, NetworkRow, TableDataVector};
 use crate::database::repository::Repository;
-use crate::system::domain::InternalEvent;
+use crate::message::domain::HubMessage;
+use tracing::{error, info};
 
-
-/// Tarea de persistencia y buffering de datos de escritura.
-///
-/// Recibe comandos a través de `rx_cmd` y maneja dos flujos de trabajo principales:
-/// 1. **Datos de configuración:** Inserción y actualización inmediata de Redes, Hubs y Epoch.
-/// 2. **Datos de telemetría (`HubMessage`):** Los acumula en buffers de memoria organizados
-///    en un [`TableDataVector`] para optimizar las escrituras en disco.
-///
-/// # Estrategia de Escritura de Telemetría (Batching)
-///
-/// Para evitar bloquear la base de datos con escrituras constantes, los mensajes se insertan
-/// en lote cuando ocurre **una de dos condiciones**:
-/// - **Capacidad:** Alguno de los vectores internos del `TableDataVector` se llena (`is_some_vector_full`).
-/// - **Tiempo:** El temporizador definido por [`FLUSH_INTERVAL`] expira, evitando que los datos se queden estancados en memoria.
-#[instrument(name = "dba_insert_task", skip_all)]
-pub async fn dba_insert_task(tx_to_core: mpsc::Sender<DataServiceResponse>,
-                             mut rx_cmd: mpsc::Receiver<DataCommandInsert>,
-                             repo: Repository,
-                             shutdown: CancellationToken) {
-
-    info!("iniciando tarea dba_insert_task");
-
-    let mut tdv = TableDataVector::new();
-    let mut timer = interval(FLUSH_INTERVAL);
-    timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-    loop {
-        tokio::select! {
-            _ = shutdown.cancelled() => {
-                info!("shutdown recibido dba_insert_task");
-                break;
+pub async fn update_network(repo: &Repository, network: NetworkRow) -> bool {
+    let mut result = false;
+    match repo.update_network(network.clone()).await {
+        Ok(_) => {
+            if network.active == true {
+                let id = network.id_network;
+                info!("red con {id} activada. Modificación exitosa en base de datos");
+                result = true;
+                return result;
+            } else {
+                let id = network.id_network;
+                info!("red con {id} desactivada. Modificación exitosa en base de datos");
+                result = true;
+                return result;
             }
-
-            _ = timer.tick() => {
-                if !tdv.is_empty() {
-                    repo.insert(&tdv).await.ok();
-                    tdv.clear();
-                }
-            }
-
-            Some(command) = rx_cmd.recv() => {
-                match command {
-                    DataCommandInsert::InsertHubMessage(message) => {
-                        debug!("mensaje HubMessage entrante a dba_insert_task (No Hay Conexión con Servidor)");
-                        sort_by_vectors(message, &mut tdv);
-                        if tdv.is_some_vector_full() {
-                            repo.insert(&tdv).await.ok();
-                            tdv.clear();
-                        }
-                    },
-                    DataCommandInsert::InsertNetwork(network) => {
-                        match repo.insert_network(network.clone()).await {
-                            Ok(_) => {
-                                let id = network.id_network;
-                                info!("nueva red con id {id} insertada en la base de datos");
-                                if tx_to_core.send(DataServiceResponse::NetworksUpdated((id, 100))).await.is_err() {
-                                    error!("no se pudo enviar NetworksUpdated desde dba_insert_task");
-                                }
-                            }
-                            Err(e) => {
-                                error!("no se pudo insertar NetworkRow en base de datos. {e}");
-                                if tx_to_core.send(DataServiceResponse::NetworksUpdated((network.id_network, 101))).await.is_err() {
-                                    error!("no se pudo enviar NetworksUpdated desde dba_insert_task");
-                                }
-                            },
-                        }
-                    },
-                    DataCommandInsert::UpdateNetwork(network) => {
-                        match repo.update_network(network.clone()).await {
-                            Ok(_) => {
-                                if network.active == true {
-                                    let id = network.id_network;
-                                    info!("red con {id} activada. Modificación exitosa en base de datos");
-                                    if tx_to_core.send(DataServiceResponse::NetworksUpdated((id, 300))).await.is_err() {
-                                        error!("no se pudo enviar NetworksUpdated desde dba_insert_task");
-                                    }
-                                } else {
-                                    let id = network.id_network;
-                                    info!("red con {id} desactivada. Modificación exitosa en base de datos");
-                                    if tx_to_core.send(DataServiceResponse::NetworksUpdated((id, 400))).await.is_err() {
-                                        error!("no se pudo enviar NetworksUpdated desde dba_insert_task");
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                if network.active == true {
-                                    let id = network.id_network;
-                                    error!("Falló la actualización en la base de datos de la red con {id}. Estado que se quería cargar: activada. {e}");
-                                    if tx_to_core.send(DataServiceResponse::NetworksUpdated((id, 301))).await.is_err() {
-                                        error!("no se pudo enviar NetworksUpdated desde dba_insert_task");
-                                    }
-                                } else {
-                                    let id = network.id_network;
-                                    error!("Falló la actualización en la base de datos de la red con {id}. Estado que se quería cargar: desactivada. {e}");
-                                    if tx_to_core.send(DataServiceResponse::NetworksUpdated((id, 401))).await.is_err() {
-                                        error!("no se pudo enviar NetworksUpdated desde dba_insert_task");
-                                    }
-                                }
-                            }
-                        }
-                    },
-                    DataCommandInsert::NewEpoch(epoch) => {
-                        match repo.update_epoch(epoch).await {
-                            Ok(_) => {
-                                info!("nuevo Epoch {epoch} insertado en la base de datos");
-                            }
-                            Err(e) => error!("no se pudo insertar nuevo Epoch en base de datos. {e}"),
-                        }
-                    },
-                    DataCommandInsert::InsertHub(hub) => {
-                        match repo.get_number_of_networks().await {
-                            Ok(networks) => {
-                                info!("hay {networks} redes en la base de datos");
-                                if networks > 0 {
-                                    match repo.insert_hub(hub.clone()).await {
-                                        Ok(_) => {
-                                            let id = hub.id.clone();
-                                            info!("nuevo Hub con id {id} insertado en la base de datos");
-                                            if tx_to_core.send(DataServiceResponse::HubInserted(hub.id)).await.is_err() {
-                                                error!("no se pudo enviar HubInserted desde dba_insert_task");
-                                            }
-                                            if tx_to_core.send(DataServiceResponse::ThereAreNetworks).await.is_err() {
-                                                error!("no se pudo enviar ThereAreNetworks desde dba_insert_task");
-                                            }
-                                        }
-                                        Err(e) => {
-                                            let id = hub.id;
-                                            error!("no se pudo insertar un nuevo Hub con id {id} en base de datos. {e}")
-                                        },
-                                    }
-                                } else {
-                                    info!("no se puede insertar el hub, debido a que no hay redes en la base de datos");
-                                }
-                            }
-                            Err(e) => error!("no se pudo obtener el total de redes presentes en el sistema. {e}"),
-                        }
-                    }
-                }
+        }
+        Err(e) => {
+            if network.active == true {
+                let id = network.id_network;
+                error!(
+                    "Falló la actualización en la base de datos de la red con {id}. Estado que se quería cargar: activada. {e}"
+                );
+                return result;
+            } else {
+                let id = network.id_network;
+                error!(
+                    "Falló la actualización en la base de datos de la red con {id}. Estado que se quería cargar: desactivada. {e}"
+                );
+                return result;
             }
         }
     }
 }
 
+pub async fn save_hub(repo: &Repository, hub: HubRow) -> bool {
+    let mut result = false;
+    match repo.get_number_of_networks().await {
+        Ok(networks) => {
+            info!("hay {networks} redes en la base de datos");
+            if networks > 0 {
+                match repo.insert_hub(hub.clone()).await {
+                    Ok(_) => {
+                        let id = hub.id.clone();
+                        info!("nuevo Hub con id {id} insertado en la base de datos");
+                        result = true;
+                    }
+                    Err(e) => {
+                        let id = hub.id;
+                        error!("no se pudo insertar un nuevo Hub con id {id} en base de datos. {e}")
+                    }
+                }
+            } else {
+                info!("no se puede insertar el hub, debido a que no hay redes en la base de datos");
+            }
+        }
+        Err(e) => error!("no se pudo obtener el total de redes presentes en el sistema. {e}"),
+    }
+    return result;
+}
+
+pub async fn delete_network(repo: &Repository, id: String) -> NetworkResult {
+    let mut res = NetworkResult {
+        result: false,
+        zero_networks: false,
+    };
+    match repo.delete_network(&id).await {
+        Ok(_) => res.result = true,
+        Err(e) => {
+            error!("no se pudo eliminar red con id: {id}. {e}");
+            res.result = false;
+        }
+    }
+    match repo.get_number_of_networks().await {
+        Ok(networks) => {
+            if networks == 0 {
+                res.zero_networks = true;
+            }
+        }
+        Err(e) => error!("no se pudo obtener el total de redes presentes en el sistema. {e}"),
+    }
+    return res;
+}
+
+pub async fn all_networks(repo: &Repository) -> AllNetworksResult {
+    let mut result = AllNetworksResult {
+        networks: None,
+        hubs: None,
+    };
+    match repo.get_number_of_networks().await {
+        Ok(networks) => {
+            if networks > 0 {
+                match repo.get_all_network().await {
+                    Ok(networks) => result.networks = Some(networks),
+                    Err(_) => {}
+                }
+                match repo.get_number_of_hubs().await {
+                    Ok(hubs) => {
+                        if hubs > 0 {
+                            match repo.get_all_hubs().await {
+                                Ok(hubs) => result.hubs = Some(hubs),
+                                Err(_) => {}
+                            }
+                        } else {
+                            info!("no hay hubs registrados en la base de datos");
+                        }
+                    }
+                    Err(e) => {
+                        error!("no se pudo obtener el total de hubs presentes en el sistema. {e}")
+                    }
+                }
+            } else {
+                info!("no hay redes registradas en la base de datos");
+            }
+        }
+        Err(e) => error!("no se pudo obtener el total de redes presentes en el sistema. {e}"),
+    }
+    return result;
+}
 
 /// Clasifica un mensaje de telemetría entrante y lo apila en el vector correspondiente.
 ///
 /// Dependiendo de la variante del enum `HubMessage`, el dato se enruta a la tabla
 /// lógica pertinente dentro del buffer `TableDataVector`.
-fn sort_by_vectors(msg: HubMessage, tdv: &mut TableDataVector) {
-
+pub fn sort_by_vectors(msg: HubMessage, tdv: &mut TableDataVector) {
     match msg {
         HubMessage::Report(report) => {
             tdv.measurement.push(report);
-        },
+        }
         HubMessage::Monitor(monitor) => {
             tdv.monitor.push(monitor);
-        },
+        }
         HubMessage::AlertAir(alert_air) => {
             tdv.alert_air.push(alert_air);
-        },
+        }
         HubMessage::AlertTem(alert_tem) => {
             tdv.alert_th.push(alert_tem);
-        },
-        _ => {},
-    }
-}
-
-
-// -------------------------------------------------------------------------------------------------
-
-
-/// Tarea encargada de la eliminación de datos persistentes.
-///
-/// Escucha comandos de tipo [`DataCommandDelete`] para borrar Redes o Hubs específicos.
-/// Tras una eliminación, evalúa si el sistema se quedó sin redes configuradas para notificar
-/// al Core mediante el evento `NoNetworks`.
-pub async fn dba_remove_task(tx: mpsc::Sender<DataServiceResponse>,
-                             mut rx_cmd: mpsc::Receiver<DataCommandDelete>,
-                             repo: Repository,
-                             shutdown: CancellationToken) {
-
-    loop {
-        tokio::select! {
-            _ = shutdown.cancelled() => {
-                info!("shutdown recibido dba_remove_task");
-                break;
-            }
-            
-            Some(msg) = rx_cmd.recv() => {
-                match msg {
-                    DataCommandDelete::DeleteNetwork(id) => {
-                        match repo.delete_network(&id).await {
-                            Ok(_) => {
-                                if tx.send(DataServiceResponse::NetworksUpdated((id, 200))).await.is_err() {
-                                    error!("no se pudo enviar NetworksUpdated desde dba_remove_task");
-                                }
-                            }
-                            Err(e) => {
-                                error!("no se pudo eliminar red con id: {id}. {e}");
-                                if tx.send(DataServiceResponse::NetworksUpdated((id, 201))).await.is_err() {
-                                    error!("no se pudo enviar NetworksUpdated desde dba_insert_task");
-                                }
-                            },
-                        }
-                        match repo.get_number_of_networks().await {
-                            Ok(networks) => {
-                                if networks == 0 {
-                                    if tx.send(DataServiceResponse::NoNetworks).await.is_err() {
-                                        error!("no se pudo enviar NoNetworks desde dba_remove_task");
-                                    }
-                                }
-                            }
-                            Err(e) => error!("no se pudo obtener el total de redes presentes en el sistema. {e}"),
-                        }
-                    },
-                    DataCommandDelete::DeleteAllHubByNetwork(id) => {
-                        match repo.delete_hub_network(&id).await {
-                            Ok(_) => {}
-                            Err(e) => error!("no se pudo eliminar todos los hub de la red con id: {id}. {e}"),
-                        }
-                    },
-                    DataCommandDelete::DeleteHub(id) => {
-                        match repo.delete_hub(&id).await {
-                            Ok(_) => {}
-                            Err(e) => error!("no se pudo eliminar hub con id: {id}. {e}"),
-                        }
-                    },
-                }
-            }
         }
-    }
-}
-
-
-// -------------------------------------------------------------------------------------------------
-
-
-/// Tarea de recuperación de datos (El "Forward" del patrón Store-and-Forward) y lectura general.
-///
-/// Tiene dos responsabilidades principales:
-/// 1. **Atender consultas (Read):** Escucha `DataCommandGet` para devolver estados actuales
-///    (Epoch, lista de Redes, lista de Hubs).
-/// 2. **Retransmitir telemetría atrasada:** Monitorea el estado de la conexión mediante `InternalEvent`.
-///    Al detectar una transición de `Disconnected` a `Connected`, dispara el vaciado de los
-///    datos almacenados en SQLite hacia el servidor exterior.
-#[instrument(name = "dba_get_task", skip_all)]
-pub async fn dba_get_task(tx_to_core: mpsc::Sender<DataServiceResponse>,
-                          mut rx_from_core: mpsc::Receiver<InternalEvent>,
-                          mut rx_from: mpsc::Receiver<DataCommandGet>,
-                          repo: Repository,
-                          shutdown: CancellationToken) {
-
-    info!("iniciando tarea dba_get_task");
-
-    let mut state : ServerStatus = ServerStatus::Disconnected;
-    let mut old_state : ServerStatus = ServerStatus::Disconnected;
-
-    loop {
-        tokio::select! {
-            _ = shutdown.cancelled() => {
-                info!("shutdown recibido dba_get_task");
-                break;
-            }
-            
-            Some(internal) = rx_from_core.recv() => {
-                match internal {
-                    InternalEvent::ServerConnected => {
-                        debug!("server connected entrante en dba_get_task");
-                        state = ServerStatus::Connected;
-                    },
-                    InternalEvent::ServerDisconnected => {
-                        debug!("server disconnected entrante en dba_get_task");
-                        state = ServerStatus::Disconnected;
-                        old_state = ServerStatus::Disconnected;
-                    }
-                    _ => {}
-                }
-
-                if state == ServerStatus::Connected && old_state == ServerStatus::Disconnected {
-                    debug!("obtener batch en dba_get_task");
-                    old_state = state;
-                    get_all_tables(&repo, &tx_to_core).await;
-                }
-            }
-
-            Some(cmd) = rx_from.recv() => {
-                match cmd {
-                    DataCommandGet::GetEpoch => {
-                        match repo.get_epoch().await {
-                            Ok(epoch) => {
-                                if tx_to_core.send(DataServiceResponse::Epoch(epoch)).await.is_err() {
-                                    error!("no se pudo enviar Epoch a DataService desde dba_get_task");
-                                }
-                            }
-                            Err(_) => {
-                                if tx_to_core.send(DataServiceResponse::ErrorEpoch).await.is_err() {
-                                    error!("no se pudo enviar ErrorEpoch a DataService desde dba_get_task");
-                                }
-                            }
-                        }
-                    },
-                    DataCommandGet::GetTotalOfNetworks => {
-                        match repo.get_number_of_networks().await {
-                            Ok(networks) => {
-                                if networks > 0 {
-                                    match repo.get_all_network().await {
-                                        Ok(networks) => {
-                                            if tx_to_core.send(DataServiceResponse::BatchNetwork(networks)).await.is_err() {
-                                                error!("no se pudo enviar BatchNetwork desde dba_get_task");
-                                            }
-                                        }
-                                        Err(e) => error!("no se pudo obtener todas las redes de la base de datos. {e}"),
-                                    }
-                                    match repo.get_number_of_hubs().await {
-                                        Ok(hubs) => {
-                                            if hubs > 0 {
-                                                match repo.get_all_hubs().await {
-                                                    Ok(hubs) => {
-                                                        if tx_to_core.send(DataServiceResponse::BatchHub(hubs)).await.is_err() {
-                                                            error!("no se pudo enviar BatchHub desde dba_get_task");
-                                                        }
-                                                        if tx_to_core.send(DataServiceResponse::ThereAreNetworks).await.is_err() {
-                                                            error!("no se pudo enviar ThereAreNetworks desde dba_get_task");
-                                                        }
-                                                    }
-                                                    Err(e) => error!("no se pudo obtener todos los hubs de la base de datos. {e}"),
-                                                }
-                                            }
-                                            else {
-                                                info!("no hay hubs registrados en la base de datos");
-                                            }
-                                        }
-                                        Err(e) => error!("no se pudo obtener el total de hubs presentes en el sistema. {e}"),
-                                    }
-                                }
-                                else {
-                                    info!("no hay redes registradas en la base de datos");
-                                }
-                            }
-                            Err(e) => error!("no se pudo obtener el total de redes presentes en el sistema. {e}"),
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-
-/// Helper para extraer iterativamente los datos persistidos y enviarlos al Core.
-///
-/// Realiza un bucle llamando a `repo.pop_batch()` que elimina y retorna un bloque de datos de la base de datos.
-/// El proceso se detiene cuando `pop_batch` retorna un bloque vacío.
-///
-/// **Nota de Control de Flujo:** Se aplica un `sleep` de 100ms entre cada envío para evitar
-/// saturar el canal `tx` y darle respiro al Core para procesar los batches enviados.
-async fn get_all_tables(repo: &Repository, tx: &mpsc::Sender<DataServiceResponse>) {
-    loop {
-        match repo.pop_batch().await {
-            Ok(tdv) => {
-                if tdv.is_empty() {
-                    break;
-                }
-                if tx.send(DataServiceResponse::Batch(tdv)).await.is_err() {
-                    error!("canal cerrado, no se pudo enviar pop batch");
-                    break;
-                }
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-            },
-            Err(e) => {
-                error!("no se pudo hacer pop batch. {}", e);
-                break;
-            }
-        }
+        _ => {}
     }
 }

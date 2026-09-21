@@ -426,7 +426,7 @@ impl Network {
 
         Self {
             id_network,
-            topic_hub_state: Topic::new(t_hub_state, 0), 
+            topic_hub_state: Topic::new(t_hub_state, 0),
             topic_data: Topic::new(t_data, 0),
             topic_alert_air: Topic::new(t_alert_air, 1),
             topic_alert_temp: Topic::new(t_alert_temp, 1),
@@ -444,24 +444,6 @@ impl Network {
             topic_queue_empty_safe: Topic::new(t_queue_empty_safe, 1),
             active,
         }
-    }
-}
-
-/// DTO (Data Transfer Object) para mapear redes planas desde la tabla SQL.
-#[derive(Debug, FromRow, Deserialize, PartialEq, Clone)]
-pub struct NetworkRow {
-    pub id_network: String,
-    pub active: bool,
-}
-
-/// Convierte una fila plana de base de datos (`NetworkRow`) a la estructura jerárquica (`Network`).
-impl NetworkRow {
-    pub fn cast_to_network(self) -> Network {
-        Network::new(self.id_network, self.active)
-    }
-
-    pub fn new(id_network: String, active: bool) -> Self {
-        Self { id_network, active }
     }
 }
 
@@ -494,14 +476,6 @@ pub enum HubChanged {
 pub struct Hub {
     pub id: String,
     pub device_name: String,
-}
-
-/// DTO (Data Transfer Object) para mapear Hubs físicos desde la tabla SQL.
-#[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq, Eq, FromRow, Hash)]
-pub struct HubRow {
-    pub id: String,
-    pub device_name: String,
-    pub network_id: String,
 }
 
 impl HubRow {

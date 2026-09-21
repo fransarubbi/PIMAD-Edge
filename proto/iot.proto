@@ -30,6 +30,7 @@ message FromEdge {
     NetworkAck network_ack = 16;
     HubState hub_state = 17;
     FirmwareOutcomeError outcome_error = 18;
+    UpdateEdgeFirmware update_edge_firmware = 19;
   }
 }
 
@@ -46,6 +47,7 @@ message ToEdge {
     Settings settings = 6;
     Heartbeat heartbeat = 7;
     HelloWorld hello_world = 8;
+    UpdateEdgeFirmware update_edge_firmware = 9;
   }
 }
 
@@ -162,6 +164,11 @@ message Heartbeat {
 message UpdateFirmware {
   Metadata metadata = 1;
   string network = 2;
+}
+
+message UpdateEdgeFirmware {
+    Metadata metadata = 1;
+    string version = 2;
 }
 
 message FirmwareOutcome {

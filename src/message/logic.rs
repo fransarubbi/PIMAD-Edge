@@ -20,16 +20,16 @@ use crate::database::domain::TableDataVector;
 use crate::grpc;
 use crate::grpc::from_edge::Payload;
 use crate::grpc::{
-    EdgeState as StateEdge, FirmwareOutcome, FromEdge, HelloWorld as Hello,
-    NetworkAck as AckNetwork, SettingOk as SettOk, Settings as Sett, SystemMetrics, ToEdge,
-    to_edge, HubState as Hub, FirmwareOutcomeError
+    EdgeState as StateEdge, FirmwareOutcome, FirmwareOutcomeError, FromEdge, HelloWorld as Hello,
+    HubState as Hub, NetworkAck as AckNetwork, SettingOk as SettOk, Settings as Sett,
+    SystemMetrics, ToEdge, UpdateEdgeFirmware as UpdateEdge, to_edge,
 };
 use crate::message::domain::{
     AlertAir, AlertTh, DeleteHub, EdgeState, EmptyQueue, EmptyQueueSafeMode, FirmwareOk,
-    HandshakeFromHub, Heartbeat as HeartbeatMsg, HelloWorld, HubMessage, LinkageRequest,
+    HandshakeFromHub, Heartbeat as HeartbeatMsg, HelloWorld, HubMessage, HubState, LinkageRequest,
     LocalStatus, Measurement, MessageServiceCommand, MessageServiceResponse, Metadata, Monitor,
     Network, NetworkAck, SerializedMessage, ServerMessage, ServerStatus, SettingOk, Settings,
-    UpdateFirmware, HubState
+    UpdateEdgeFirmware, UpdateFirmware,
 };
 use crate::network::domain::NetworkManager;
 use crate::system::domain::{InternalEvent, System};
@@ -150,7 +150,7 @@ pub async fn msg_to_hub(
 /// se publican con el flag `Retain = true` para que los dispositivos nuevos los reciban al conectar.
 async fn resolve_static_topic(
     manager: &NetworkManager,
-    msg: &HubMessage
+    msg: &HubMessage,
 ) -> Option<(String, u8, bool)> {
     match msg {
         HubMessage::HandshakeToHub(_) => Some((
@@ -264,7 +264,7 @@ pub async fn msg_from_hub(
                                     from_slice::<LinkageRequest>(&payload).ok().map(HubMessage::LinkageRequest)
                                 } else if topic.ends_with("empty_queue_safe") {
                                     from_slice::<EmptyQueueSafeMode>(&payload).ok().map(HubMessage::EmptyQueueSafe)
-                                } 
+                                }
                                 else if topic.ends_with("empty_queue") {
                                     from_slice::<EmptyQueue>(&payload).ok().map(HubMessage::EmptyQueue)
                                 } else {
@@ -452,7 +452,7 @@ pub async fn msg_to_server(
                             _ => {}
                         }
                     },
-                    MessageServiceCommand::Batch(batch) => { 
+                    MessageServiceCommand::Batch(batch) => {
                         if matches!(state, ServerStatus::Disconnected) {
                             warn!("mensaje del hub descartado, servidor desconectado");
                             continue;
@@ -567,7 +567,7 @@ fn convert_to_proto_upload(msg: ServerMessage, edge_id: String) -> Option<FromEd
                     timestamp: hub_state.metadata.timestamp,
                 }),
                 network: hub_state.network,
-                state: hub_state.state
+                state: hub_state.state,
             }))
         }
         ServerMessage::EdgePeriodic(edge_state) => {
@@ -811,6 +811,17 @@ fn convert_to_proto_upload(msg: ServerMessage, edge_id: String) -> Option<FromEd
 
             Some(Payload::AlertThBatch(grpc::AlertThBatch {
                 alerts: proto_alerts,
+            }))
+        }
+        ServerMessage::UpdateEdgeFirmware(update) => {
+            debug!("serializando mensaje UpdateEdgeFirmware para el servidor");
+            Some(Payload::UpdateEdgeFirmware(UpdateEdge {
+                metadata: Some(grpc::Metadata {
+                    sender_user_id: update.metadata.sender_user_id,
+                    destination_id: update.metadata.destination_id,
+                    timestamp: update.metadata.timestamp,
+                }),
+                version: update.version,
             }))
         }
         _ => None,
@@ -1071,6 +1082,22 @@ async fn handle_grpc_message(
                 if tx
                     .send(MessageServiceResponse::FromServer(
                         ServerMessage::HelloWorld(msg),
+                    ))
+                    .await
+                    .is_err()
+                {
+                    error!("no se pudo enviar mensaje HelloWorld a la fsm general");
+                }
+            }
+            to_edge::Payload::UpdateEdgeFirmware(update) => {
+                debug!("mensaje UpdateEdgeFirmware entrante desde el servidor");
+                let msg = UpdateEdgeFirmware {
+                    metadata: extract_metadata(update.metadata),
+                    version: update.version,
+                };
+                if tx
+                    .send(MessageServiceResponse::FromServer(
+                        ServerMessage::UpdateEdgeFirmware(msg),
                     ))
                     .await
                     .is_err()

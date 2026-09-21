@@ -1,6 +1,5 @@
+use crate::database::domain::NetworkRow;
 use sqlx::{Executor, SqlitePool};
-use crate::network::domain::{NetworkRow};
-
 
 /// Crea la tabla `network` en la base de datos si aún no existe.
 ///
@@ -30,19 +29,18 @@ use crate::network::domain::{NetworkRow};
 /// - La función es *idempotente* (`IF NOT EXISTS`).
 /// - No realiza migraciones: si el esquema cambia en el código, se debe
 ///   actualizar la base de datos manualmente o borrar el archivo `.db`.
-pub async fn create_table_network(pool: &SqlitePool) -> Result<(), sqlx::Error>  {
+pub async fn create_table_network(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     pool.execute(
         r#"
         CREATE TABLE IF NOT EXISTS network (
             id_network               TEXT PRIMARY KEY,
             active                   BOOLEAN NOT NULL DEFAULT TRUE
         );
-        "#
+        "#,
     )
-        .await?;
+    .await?;
     Ok(())
 }
-
 
 /// Inserta una nueva configuración de red en la tabla `network`.
 ///
@@ -66,27 +64,26 @@ pub async fn create_table_network(pool: &SqlitePool) -> Result<(), sqlx::Error> 
 ///
 /// - Los campos booleanos se convierten automáticamente a enteros (0/1) por SQLite.
 /// - Los campos de tipo struct interno (`Topic`) se aplanan en columnas individuales.
-pub async fn insert_network_database(pool: &SqlitePool,
-                                     data: NetworkRow
-                                    ) -> Result<(), sqlx::Error> {
-
+pub async fn insert_network_database(
+    pool: &SqlitePool,
+    data: NetworkRow,
+) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
         INSERT INTO network (
-            id_network, 
+            id_network,
             active
         )
         VALUES (?, ?)
-        "#
+        "#,
     )
-        .bind(data.id_network)
-        .bind(data.active)
-        .execute(pool)
-        .await?;
+    .bind(data.id_network)
+    .bind(data.active)
+    .execute(pool)
+    .await?;
 
     Ok(())
 }
-
 
 /// Elimina una red de la base de datos.
 ///
@@ -111,15 +108,14 @@ pub async fn delete_network_database(pool: &SqlitePool, id: &str) -> Result<(), 
         r#"
         DELETE FROM network
         WHERE id_network = ?
-        "#
+        "#,
     )
-        .bind(id)
-        .execute(pool)
-        .await?;
+    .bind(id)
+    .execute(pool)
+    .await?;
 
     Ok(())
 }
-
 
 /// Recupera todas las redes almacenadas en la base de datos.
 ///
@@ -142,19 +138,15 @@ pub async fn get_all_network_data(pool: &SqlitePool) -> Result<Vec<NetworkRow>, 
     let result = sqlx::query_as::<_, NetworkRow>(
         r#"
         SELECT * FROM network
-        "#
+        "#,
     )
-        .fetch_all(pool)
-        .await?;
+    .fetch_all(pool)
+    .await?;
 
     Ok(result)
 }
 
-
-pub async fn upsert_network(pool: &SqlitePool,
-                            data: NetworkRow
-                            ) -> Result<(), sqlx::Error> {
-
+pub async fn upsert_network(pool: &SqlitePool, data: NetworkRow) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
         INSERT INTO network (
@@ -163,23 +155,20 @@ pub async fn upsert_network(pool: &SqlitePool,
         ) VALUES (?, ?)
         ON CONFLICT(id_network) DO UPDATE SET
             active       = excluded.active
-        "#
+        "#,
     )
-        .bind(data.id_network)
-        .bind(data.active)
-        .execute(pool)
-        .await?;
+    .bind(data.id_network)
+    .bind(data.active)
+    .execute(pool)
+    .await?;
 
     Ok(())
 }
 
-
 pub async fn count_networks(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
     let query = format!("SELECT COUNT(*) FROM {}", "network");
 
-    let count: i64 = sqlx::query_scalar(&query)
-        .fetch_one(pool)
-        .await?;
+    let count: i64 = sqlx::query_scalar(&query).fetch_one(pool).await?;
 
     Ok(count)
 }

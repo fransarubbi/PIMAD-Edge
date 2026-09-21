@@ -591,6 +591,12 @@ pub struct UpdateFirmware {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UpdateEdgeFirmware {
+    pub metadata: Metadata,
+    pub version: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UpdateFirmwareRequestHub {
     #[serde(rename = "m")]
     pub metadata: Metadata,
@@ -729,6 +735,7 @@ pub enum HubMessage {
 pub enum ServerMessage {
     // Mensajes provenientes del Server
     UpdateFirmware(UpdateFirmware),
+    UpdateEdgeFirmware(UpdateEdgeFirmware),
     DeleteHub(DeleteHub),
     FromServerSettings(Settings),
     FromServerSettingsAck(SettingOk),

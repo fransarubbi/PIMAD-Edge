@@ -8,9 +8,8 @@
 //! Es una tabla plana que almacena tanto los metadatos aplanados (`MetadataRow`) como
 //! los campos específicos de configuración del Hub (`HubRow`).
 
-
+use crate::database::domain::HubRow;
 use sqlx::{Executor, SqlitePool};
-use crate::network::domain::HubRow;
 
 /// Inicializa la tabla `hub` en la base de datos.
 ///
@@ -20,7 +19,7 @@ use crate::network::domain::HubRow;
 /// - `id`: Identificador interno (Primary Key).
 /// - Campos de Metadatos: `sender_user_id`, `destination_type`, `destination_id`, `timestamp`, `topic_where_arrive`.
 /// - Campos de Configuración: `network_id`, `wifi_ssid`, `wifi_password`, `mqtt_uri`, `device_name`, `sample`, `energy_mode`.
-pub async fn create_table_hub(pool: &SqlitePool) -> Result<(), sqlx::Error>  {
+pub async fn create_table_hub(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     pool.execute(
         r#"
         CREATE TABLE IF NOT EXISTS hub (
@@ -28,13 +27,12 @@ pub async fn create_table_hub(pool: &SqlitePool) -> Result<(), sqlx::Error>  {
             network_id           TEXT NOT NULL,
             device_name          TEXT NOT NULL
         );
-        "#
+        "#,
     )
-        .await?;
+    .await?;
 
     Ok(())
 }
-
 
 /// Inserta un nuevo registro de Hub en la base de datos.
 ///
@@ -43,10 +41,7 @@ pub async fn create_table_hub(pool: &SqlitePool) -> Result<(), sqlx::Error>  {
 ///
 /// # Errores
 /// Retorna `sqlx::Error` si falla la conexión o la restricción de datos.
-pub async fn insert_hub_table(pool: &SqlitePool,
-                              data: HubRow
-) -> Result<(), sqlx::Error> {
-
+pub async fn insert_hub_table(pool: &SqlitePool, data: HubRow) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
             INSERT INTO hub (
@@ -55,17 +50,16 @@ pub async fn insert_hub_table(pool: &SqlitePool,
                 device_name
             )
             VALUES (?, ?, ?)
-            "#
+            "#,
     )
-        .bind(data.id)
-        .bind(data.network_id)
-        .bind(data.device_name)
-        .execute(pool)
-        .await?;
+    .bind(data.id)
+    .bind(data.network_id)
+    .bind(data.device_name)
+    .execute(pool)
+    .await?;
 
     Ok(())
 }
-
 
 /// Elimina todos los Hubs asociados a una red específica.
 ///
@@ -74,20 +68,22 @@ pub async fn insert_hub_table(pool: &SqlitePool,
 ///
 /// # Parámetros
 /// - `id`: El `network_id` a buscar y eliminar.
-pub async fn delete_hub_according_to_network(pool: &SqlitePool, id: &str) -> Result<(), sqlx::Error> {
+pub async fn delete_hub_according_to_network(
+    pool: &SqlitePool,
+    id: &str,
+) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
         DELETE FROM hub
         WHERE network_id = ?
-        "#
+        "#,
     )
-        .bind(id)
-        .execute(pool)
-        .await?;
+    .bind(id)
+    .execute(pool)
+    .await?;
 
     Ok(())
 }
-
 
 /// Elimina un Hub específico basado en su identificador de usuario/dispositivo.
 ///
@@ -98,15 +94,14 @@ pub async fn delete_hub_according_to_id(pool: &SqlitePool, id: &str) -> Result<(
         r#"
         DELETE FROM hub
         WHERE sender_user_id = ?
-        "#
+        "#,
     )
-        .bind(id)
-        .execute(pool)
-        .await?;
+    .bind(id)
+    .execute(pool)
+    .await?;
 
     Ok(())
 }
-
 
 /// Recupera todos los Hubs registrados en el sistema.
 ///
@@ -115,21 +110,18 @@ pub async fn get_all_hubs(pool: &SqlitePool) -> Result<Vec<HubRow>, sqlx::Error>
     let result = sqlx::query_as::<_, HubRow>(
         r#"
         SELECT * FROM hub
-        "#
+        "#,
     )
-        .fetch_all(pool)
-        .await?;
+    .fetch_all(pool)
+    .await?;
 
     Ok(result)
 }
 
-
 pub async fn count_hubs(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
     let query = format!("SELECT COUNT(*) FROM {}", "hub");
 
-    let count: i64 = sqlx::query_scalar(&query)
-        .fetch_one(pool)
-        .await?;
+    let count: i64 = sqlx::query_scalar(&query).fetch_one(pool).await?;
 
     Ok(count)
 }

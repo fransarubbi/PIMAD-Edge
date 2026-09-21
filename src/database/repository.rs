@@ -35,22 +35,33 @@
 //! - `dba_insert_task`
 //! - `dba_get_task`
 
-
-use std::time::Duration;
+use crate::config::sqlite::{LIMIT, WAIT_FOR};
+use crate::database::domain::{HubRow, NetworkRow, TableDataVector};
+use crate::database::tables::alert_air::{
+    create_table_alert_air, insert_alert_air, pop_batch_alert_air,
+};
+use crate::database::tables::alert_temp::{
+    create_table_alert_temp, insert_alert_temp, pop_batch_alert_temp,
+};
+use crate::database::tables::balance_epoch::{
+    create_table_balance_epoch, get_balance_epoch, insert_balance_epoch,
+};
+use crate::database::tables::hub::{
+    count_hubs, create_table_hub, delete_hub_according_to_id, delete_hub_according_to_network,
+    get_all_hubs, insert_hub_table,
+};
+use crate::database::tables::measurement::{
+    create_table_measurement, insert_measurement, pop_batch_measurement,
+};
+use crate::database::tables::monitor::{create_table_monitor, insert_monitor, pop_batch_monitor};
+use crate::database::tables::network::{
+    count_networks, create_table_network, delete_network_database, get_all_network_data,
+    insert_network_database, upsert_network,
+};
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{FromRow, SqlitePool};
+use std::time::Duration;
 use tracing::{debug, error};
-use crate::config::sqlite::{LIMIT, WAIT_FOR};
-use crate::database::domain::{TableDataVector};
-use crate::database::tables::alert_air::{create_table_alert_air, insert_alert_air, pop_batch_alert_air};
-use crate::database::tables::alert_temp::{create_table_alert_temp, insert_alert_temp, pop_batch_alert_temp};
-use crate::database::tables::balance_epoch::{create_table_balance_epoch, get_balance_epoch, insert_balance_epoch};
-use crate::database::tables::hub::{count_hubs, create_table_hub, delete_hub_according_to_id, delete_hub_according_to_network, get_all_hubs, insert_hub_table};
-use crate::database::tables::measurement::{create_table_measurement, insert_measurement, pop_batch_measurement};
-use crate::database::tables::monitor::{create_table_monitor, insert_monitor, pop_batch_monitor};
-use crate::database::tables::network::{count_networks, create_table_network, delete_network_database, get_all_network_data, insert_network_database, upsert_network};
-use crate::network::domain::{HubRow, NetworkRow};
-
 
 /// Repositorio central de acceso a la base de datos.
 ///
@@ -81,7 +92,6 @@ pub struct Repository {
 }
 
 impl Repository {
-
     /// Crea una nueva instancia del repositorio.
     ///
     /// # Flujo de inicialización
@@ -159,16 +169,19 @@ impl Repository {
 
     /// Extrae y elimina en batch de la base de datos.
     pub async fn pop_batch(&self) -> Result<TableDataVector, sqlx::Error> {
-
         let vec_measurement = pop_batch_measurement(&self.pool).await?;
         let vec_monitor = pop_batch_monitor(&self.pool).await?;
         let vec_alert_th = pop_batch_alert_temp(&self.pool).await?;
         let vec_alert_air = pop_batch_alert_air(&self.pool).await?;
 
-        Ok(TableDataVector::new_pop(vec_measurement, vec_alert_air, vec_alert_th, vec_monitor))
+        Ok(TableDataVector::new_pop(
+            vec_measurement,
+            vec_alert_air,
+            vec_alert_th,
+            vec_monitor,
+        ))
     }
 
-    
     // --- Métodos de Gestión de Redes (Network) ---
 
     /// Inserta una nueva configuración de red en la base de datos.
@@ -217,9 +230,8 @@ impl Repository {
         Ok(rows)
     }
 
-    
     // --- Métodos de Gestión de Balance Epoch ---
-    
+
     /// Inserta un nuevo valor de época en la base de datos.
     ///
     /// Utilizado al entrar en un nuevo Balance Mode.
@@ -227,7 +239,7 @@ impl Repository {
         insert_balance_epoch(&self.pool, epoch).await?;
         Ok(())
     }
-    
+
     /// Obtiene el último valor de época del sistema.
     ///
     /// # Retorno
@@ -237,7 +249,6 @@ impl Repository {
         let row = get_balance_epoch(&self.pool).await?;
         Ok(row)
     }
-
 
     // --- Métodos de Gestión de Hubs ---
 
@@ -268,7 +279,6 @@ impl Repository {
     }
 }
 
-
 /// Crea el pool de conexiones SQLite.
 ///
 /// # Notas
@@ -286,7 +296,6 @@ async fn create_pool(db_path: &str) -> Result<SqlitePool, sqlx::Error> {
     Ok(pool)
 }
 
-
 /// Configura parámetros de rendimiento y concurrencia de SQLite.
 ///
 /// # PRAGMAs utilizados
@@ -295,12 +304,17 @@ async fn create_pool(db_path: &str) -> Result<SqlitePool, sqlx::Error> {
 /// - `synchronous = NORMAL`: balance entre seguridad y rendimiento.
 /// - `busy_timeout`: espera antes de fallar por bloqueo (5000 ms).
 async fn configure_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
-    sqlx::query("PRAGMA journal_mode = WAL;").execute(pool).await?;
-    sqlx::query("PRAGMA synchronous = NORMAL;").execute(pool).await?;
-    sqlx::query("PRAGMA busy_timeout = 5000;").execute(pool).await?;
+    sqlx::query("PRAGMA journal_mode = WAL;")
+        .execute(pool)
+        .await?;
+    sqlx::query("PRAGMA synchronous = NORMAL;")
+        .execute(pool)
+        .await?;
+    sqlx::query("PRAGMA busy_timeout = 5000;")
+        .execute(pool)
+        .await?;
     Ok(())
 }
-
 
 /// Inicializa el esquema completo de la base de datos.
 ///
@@ -319,7 +333,6 @@ async fn init_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-
 /// Función genérica para extraer y eliminar batches de una tabla.
 ///
 /// # Descripción
@@ -327,14 +340,9 @@ async fn init_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 /// Ejecuta un `DELETE ... RETURNING *` sobre la tabla indicada,
 /// devolviendo los registros eliminados como un vector del tipo `T`.
 ///
-pub async fn pop_batch_generic<T>(pool: &SqlitePool,
-                                  table: &str,
-) -> Result<Vec<T>, sqlx::Error>
+pub async fn pop_batch_generic<T>(pool: &SqlitePool, table: &str) -> Result<Vec<T>, sqlx::Error>
 where
-    T: for<'r> FromRow<'r, sqlx::sqlite::SqliteRow>
-    + Send
-    + Unpin
-    + 'static,
+    T: for<'r> FromRow<'r, sqlx::sqlite::SqliteRow> + Send + Unpin + 'static,
 {
     let sql = format!(
         r#"

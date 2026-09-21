@@ -5,18 +5,17 @@
 
 use crate::config::firmware::OTA_TIMEOUT;
 use crate::context::domain::AppContext;
-use crate::firmware::domain::{
-    FirmwareServiceCommand, FirmwareServiceResponse
-};
-use crate::firmware::domain::{Event};
+use crate::firmware::domain::Event;
+use crate::firmware::domain::{FirmwareServiceCommand, FirmwareServiceResponse};
 use crate::message::domain::{
-    FirmwareOutcome, HubMessage, Metadata, ServerMessage, UpdateFirmwareRequestHub, FirmwareOutcomeError
+    FirmwareOutcome, FirmwareOutcomeError, HubMessage, Metadata, ServerMessage, UpdateEdgeFirmware,
+    UpdateFirmwareRequestHub,
 };
 use chrono::Utc;
+use self_update::backends::github::Update;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, instrument};
-
 
 #[derive(PartialEq, Eq)]
 enum State {
@@ -30,9 +29,80 @@ struct HubFirmwareStatus {
     pub success: bool,
 }
 
+#[instrument(name = "edge_ota", skip_all)]
+pub async fn edge_ota(
+    tx: mpsc::Sender<FirmwareServiceResponse>,
+    mut rx: mpsc::Receiver<FirmwareServiceCommand>,
+    app_context: AppContext,
+) {
+    while let Some(cmd) = rx.recv().await {
+        if let FirmwareServiceCommand::UpdateEdge(update) = cmd {
+            if update.metadata.destination_id != app_context.system.id_edge {
+                info!("no se iniciará el proceso de actualización. ID equivocado");
+                continue;
+            }
+            let update_result = tokio::task::spawn_blocking(
+                || -> Result<_, Box<dyn std::error::Error + Send + Sync>> {
+                    Ok(Update::configure()
+                        .repo_owner("fransarubbi")
+                        .repo_name("PIMAD-Edge")
+                        .bin_name("pimad_edge")
+                        .show_download_progress(true)
+                        .current_version(env!("CARGO_PKG_VERSION"))
+                        .build()?
+                        .update()?)
+                },
+            )
+            .await;
 
-#[instrument(name = "update_firmware_task", skip_all)]
-pub async fn update_firmware_task(
+            match update_result {
+                Ok(Ok(status)) => {
+                    let metadata = Metadata {
+                        sender_user_id: app_context.system.id_edge.clone(),
+                        destination_id: "server0".to_string(),
+                        timestamp: Utc::now().timestamp(),
+                    };
+                    let update = UpdateEdgeFirmware {
+                        metadata,
+                        version: status.version().to_string(),
+                    };
+
+                    if status.is_updated() {
+                        info!("actualizado con éxito a la versión: {}", status.version());
+                        if tx
+                            .send(FirmwareServiceResponse::EdgeUpdated(
+                                ServerMessage::UpdateEdgeFirmware(update),
+                            ))
+                            .await
+                            .is_err()
+                        {
+                            error!("no se pudo enviar EdgeUpdated a FirmwareService");
+                        }
+                        // Dormir 10 segundos para dar tiempo a que el mensaje gRPC salga
+                        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                        std::process::exit(0);
+                    } else {
+                        info!("el sistema ya está en la última versión");
+                        if tx
+                            .send(FirmwareServiceResponse::EdgeUpdated(
+                                ServerMessage::UpdateEdgeFirmware(update),
+                            ))
+                            .await
+                            .is_err()
+                        {
+                            error!("no se pudo enviar EdgeUpdated a FirmwareService");
+                        }
+                    }
+                }
+                Ok(Err(e)) => error!("error en la actualización OTA: {}", e),
+                Err(e) => error!("error al ejecutar la tarea bloqueante (JoinError): {}", e),
+            }
+        }
+    }
+}
+
+#[instrument(name = "hub_ota", skip_all)]
+pub async fn hub_ota(
     tx_to_core: mpsc::Sender<FirmwareServiceResponse>,
     tx_to_timer: mpsc::Sender<Event>,
     mut rx_msg: mpsc::Receiver<FirmwareServiceCommand>,
@@ -41,15 +111,15 @@ pub async fn update_firmware_task(
     cancel: CancellationToken,
 ) {
     let mut state = State::Sleeping;
-    let mut process_vector : Vec<HubFirmwareStatus> = Vec::new();
-    let mut index : usize = 0;
+    let mut process_vector: Vec<HubFirmwareStatus> = Vec::new();
+    let mut index: usize = 0;
     let mut version = String::new();
     let mut network = String::new();
 
-    if tx_to_timer.send(Event::StopTimer).await.is_err(){
+    if tx_to_timer.send(Event::StopTimer).await.is_err() {
         error!("no se pudo enviar StopTimer");
     }
-    
+
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
@@ -59,7 +129,7 @@ pub async fn update_firmware_task(
 
             Some(msg_from_server) = rx_msg.recv() => {
                 match msg_from_server {
-                    FirmwareServiceCommand::Update(update) => {
+                    FirmwareServiceCommand::UpdateHub(update) => {
                         state = State::Working;
                         process_vector.clear();
                         index = 0;
@@ -97,8 +167,8 @@ pub async fn update_firmware_task(
                                 }
 
                                 let msg = generate_message_to_hub(
-                                    &process_vector, 
-                                    index, 
+                                    &process_vector,
+                                    index,
                                     app_context.system.id_edge.clone(),
                                     network.clone(),
                                     version.clone()
@@ -132,7 +202,7 @@ pub async fn update_firmware_task(
                             if index < process_vector.len() {
                                 let id = process_vector[index].id.clone();
                                 if firmware.metadata.sender_user_id == id {
-                                    
+
                                     if tx_to_timer.send(Event::StopTimer).await.is_err() {
                                         error!("no se pudo enviar StopTimer");
                                     }
@@ -144,8 +214,8 @@ pub async fn update_firmware_task(
                                     if index < process_vector.len() {
 
                                         let msg = generate_message_to_hub(
-                                            &process_vector, 
-                                            index, 
+                                            &process_vector,
+                                            index,
                                             app_context.system.id_edge.clone(),
                                             network.clone(),
                                             version.clone()
@@ -162,7 +232,7 @@ pub async fn update_firmware_task(
                                     } else {
                                         state = State::Sleeping;
                                         let msg = generate_outcome(
-                                            &process_vector, 
+                                            &process_vector,
                                             app_context.system.id_edge.clone(),
                                             network.clone()
                                         );
@@ -171,7 +241,7 @@ pub async fn update_firmware_task(
                                         }
                                     }
                                 }
-                            } 
+                            }
                         }
                     }
                     _ => {}
@@ -193,8 +263,8 @@ pub async fn update_firmware_task(
                         if index < process_vector.len() {
 
                             let msg = generate_message_to_hub(
-                                &process_vector, 
-                                index, 
+                                &process_vector,
+                                index,
                                 app_context.system.id_edge.clone(),
                                 network.clone(),
                                 version.clone()
@@ -211,7 +281,7 @@ pub async fn update_firmware_task(
                         } else {
                             state = State::Sleeping;
                             let msg = generate_outcome(
-                                &process_vector, 
+                                &process_vector,
                                 app_context.system.id_edge.clone(),
                                 network.clone()
                             );
@@ -227,36 +297,36 @@ pub async fn update_firmware_task(
     }
 }
 
-
-
 /// Obtiene la versión actual del sistema desde el repositorio.
 async fn get_firmware_version() -> Result<String, reqwest::Error> {
-    let url = "https://raw.githubusercontent.com/fransarubbi/IoT_Environmental_Hub/master/version.txt";
-    
+    let url =
+        "https://raw.githubusercontent.com/fransarubbi/IoT_Environmental_Hub/master/version.txt";
+
     let response = reqwest::get(url).await?;
     let version_text = response.text().await?;
-    
+
     let cleaned = version_text.trim();
-    
+
     let final_version = cleaned.strip_prefix('v').unwrap_or(cleaned);
-    
+
     Ok(final_version.to_string())
 }
 
-
 fn generate_message_to_hub(
-    process_vector: &Vec<HubFirmwareStatus>, 
+    process_vector: &Vec<HubFirmwareStatus>,
     index: usize,
     id_edge: String,
     network: String,
-    version: String
+    version: String,
 ) -> UpdateFirmwareRequestHub {
-
     let hub_id = process_vector[index].id.clone();
 
     let timestamp = Utc::now().timestamp();
 
-    info!("generando mensaje para el hub: {}, en la red: {}, version: {}", hub_id, network, version);
+    info!(
+        "generando mensaje para el hub: {}, en la red: {}, version: {}",
+        hub_id, network, version
+    );
     let metadata = Metadata {
         sender_user_id: id_edge,
         destination_id: hub_id,
@@ -271,15 +341,12 @@ fn generate_message_to_hub(
     msg
 }
 
-
-fn generate_outcome_error(
-    id_edge: String,
-    network: String,
-    error: String
-) -> FirmwareOutcomeError {
-
+fn generate_outcome_error(id_edge: String, network: String, error: String) -> FirmwareOutcomeError {
     let timestamp = Utc::now().timestamp();
-    info!("generando mensaje de error para el servidor: {}, en la red: {}, error: {}", id_edge, network, error);
+    info!(
+        "generando mensaje de error para el servidor: {}, en la red: {}, error: {}",
+        id_edge, network, error
+    );
     let metadata = Metadata {
         sender_user_id: id_edge,
         destination_id: "server0".to_string(),
@@ -294,11 +361,10 @@ fn generate_outcome_error(
     msg
 }
 
-
 fn generate_outcome(
-    process_vector: &Vec<HubFirmwareStatus>, 
+    process_vector: &Vec<HubFirmwareStatus>,
     id_edge: String,
-    network: String
+    network: String,
 ) -> FirmwareOutcome {
     let total = process_vector.len();
     let mut counter = 0;
@@ -308,7 +374,10 @@ fn generate_outcome(
         }
     }
     let percentage_ok = (counter as f32 / total as f32) * 100.0;
-    info!("generando mensaje de outcome para el servidor: {}, en la red: {}, porcentaje ok: {}", id_edge, network, percentage_ok);
+    info!(
+        "generando mensaje de outcome para el servidor: {}, en la red: {}, porcentaje ok: {}",
+        id_edge, network, percentage_ok
+    );
     let timestamp = Utc::now().timestamp();
 
     let metadata = Metadata {
@@ -322,6 +391,6 @@ fn generate_outcome(
         network,
         percentage_ok,
     };
-    
+
     msg
 }

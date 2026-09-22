@@ -1,17 +1,15 @@
 //! Configuración del sistema usando archivos toml.
 //!
 
-
-use std::fs;
-use std::path::{Path};
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use crate::system::domain::{ErrorType, System};
 use crate::config::files::{PROTOCOL_TOML_PATH, SYSTEM_TOML_PATH};
 use crate::context::domain::AppContext;
-use crate::network::domain::{NetworkManager};
 use crate::quorum::domain::ProtocolSettings;
-
+use crate::system::domain::{ErrorType, System};
+use crate::third_layer::network::domain::NetworkManager;
+use std::fs;
+use std::path::Path;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 /// Inicializa los componentes fundamentales del sistema y crea el `AppContext`
 ///
@@ -31,7 +29,6 @@ use crate::quorum::domain::ProtocolSettings;
 /// etc/edge/files/protocol.toml
 ///
 pub fn initializing_system() -> Result<AppContext, ErrorType> {
-
     let system = match load_system_toml(Path::new(SYSTEM_TOML_PATH)) {
         Ok(system) => system,
         Err(e) => return Err(e),
@@ -46,7 +43,6 @@ pub fn initializing_system() -> Result<AppContext, ErrorType> {
     let net_man = Arc::new(RwLock::new(NetworkManager::new_empty(&system)));
     Ok(AppContext::new(net_man, system, protocol))
 }
-
 
 /// Carga los datos del archivo `system.toml`
 ///
@@ -80,7 +76,6 @@ fn load_system_toml(path: &Path) -> Result<System, ErrorType> {
     })
 }
 
-
 /// Carga los datos del archivo `protocol.toml`
 ///
 /// Lee los datos del archivo `protocol.toml`, el cual tiene los campos que necesita
@@ -96,7 +91,6 @@ fn load_system_toml(path: &Path) -> Result<System, ErrorType> {
 /// El archivo toml en: `etc/edge/files/protocol.toml`
 ///
 fn load_protocol_toml(path: &Path) -> Result<ProtocolSettings, ErrorType> {
-
     let content = fs::read_to_string(path).map_err(|e| {
         ErrorType::ProtocolFile(format!(
             "Error al leer la configuración en '{}': {}",

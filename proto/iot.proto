@@ -42,11 +42,9 @@ message ToEdge {
     SettingsAck settings_ack = 2;
     UpdateFirmware update_firmware = 3;
     Network network = 4;
-    DeleteHub delete_hub = 5;
-    Settings settings = 6;
-    Heartbeat heartbeat = 7;
-    HelloWorld hello_world = 8;
-    UpdateEdgeFirmware update_edge_firmware = 9;
+    Settings settings = 5;
+    Heartbeat heartbeat = 6;
+    UpdateEdgeFirmware update_edge_firmware = 7;
   }
 }
 
@@ -142,11 +140,6 @@ message NetworkAck {
   Metadata metadata = 1;
   string id_network = 2;
   uint32 code_of_ack = 3;
-}
-
-message DeleteHub {
-  Metadata metadata = 1;
-  string network = 2;
 }
 
 message ActiveHub {

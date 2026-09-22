@@ -2,17 +2,11 @@ mod channels;
 mod config;
 mod context;
 mod core;
-mod database;
-mod firmware;
-mod fsm;
-mod grpc_service;
-mod heartbeat;
-mod message;
-mod metrics;
-mod mqtt;
-mod network;
+mod first_layer;
 mod quorum;
+mod second_layer;
 mod system;
+mod third_layer;
 
 pub mod grpc {
     tonic::include_proto!("grpc");

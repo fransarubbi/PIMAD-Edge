@@ -5,13 +5,11 @@
 //! agrupando los recursos que deben ser accesibles por múltiples tareas concurrentes
 //! (Base de datos, Configuración, Caché en memoria).
 
-
+use crate::quorum::domain::ProtocolSettings;
+use crate::system::domain::System;
+use crate::third_layer::network::domain::NetworkManager;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use crate::network::domain::NetworkManager;
-use crate::quorum::domain::{ProtocolSettings};
-use crate::system::domain::System;
-
 
 /// Contenedor del estado global y recursos compartidos del sistema.
 ///
@@ -27,7 +25,6 @@ use crate::system::domain::System;
 
 #[derive(Clone, Debug)]
 pub struct AppContext {
-
     /// Gestor de Redes (Caché en memoria).
     ///
     /// Se envuelve en `Arc<RwLock<...>>` porque:
@@ -48,9 +45,7 @@ pub struct AppContext {
     pub quorum: Arc<ProtocolSettings>,
 }
 
-
 impl AppContext {
-
     /// Construye un nuevo contexto de aplicación.
     ///
     /// # Parámetros
@@ -59,14 +54,15 @@ impl AppContext {
     /// - `net_man`: Gestor de redes ya envuelto en las primitivas de concurrencia.
     /// - `system`: Configuración del sistema ya envuelta en `Arc`.
     /// - `quorum`: Configuración del comportamiento del protocolo de balanceo.
-    pub fn new(net_man: Arc<RwLock<NetworkManager>>,
-               system: Arc<System>,
-               quorum: Arc<ProtocolSettings>) -> Self {
-
+    pub fn new(
+        net_man: Arc<RwLock<NetworkManager>>,
+        system: Arc<System>,
+        quorum: Arc<ProtocolSettings>,
+    ) -> Self {
         Self {
             net_man,
             system,
-            quorum
+            quorum,
         }
     }
 }

@@ -56,7 +56,7 @@ impl MetricsService {
         (service, handle)
     }
 
-    pub async fn run(&mut self, shutdown: CancellationToken) {
+    pub async fn run(mut self, shutdown: CancellationToken) {
         let (tx_to_timer, rx_from_metrics) = mpsc::channel::<MetricsTimerEvent>(50);
         let (tx_to_metrics, rx_from_timer) = mpsc::channel::<MetricsTimerEvent>(50);
         let (tx_conn, rx_conn) = mpsc::channel::<InternalEvent>(10);

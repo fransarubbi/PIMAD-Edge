@@ -1,6 +1,7 @@
 use crate::second_layer::database::domain::{DataHandle, TableDataVector};
 use crate::second_layer::message::domain::{HubMessage, ServerMessage};
 use crate::second_layer::message::logic::{MessageHandle, MessageServiceResponse};
+use crate::system::domain::InternalEvent;
 use crate::third_layer::firmware::domain::FirmwareHandle;
 use crate::third_layer::fsm::logic::FsmHandle;
 use crate::third_layer::heartbeat::domain::HeartbeatHandle;
@@ -10,9 +11,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 pub struct SecondLayerMiddleware {
-    message_service_to_middleware: mpsc::Sender<MessageServiceResponse>,
     middleware_from_message_service: mpsc::Receiver<MessageServiceResponse>,
-    data_service_to_middleware: mpsc::Sender<TableDataVector>,
     middleware_from_data_service: mpsc::Receiver<TableDataVector>,
     middleware_to_message_service: MessageHandle,
     middleware_to_fsm_service: FsmHandle,
@@ -24,20 +23,11 @@ pub struct SecondLayerMiddleware {
 
 #[derive(Default)]
 pub struct SecondLayerMiddlewareBuilder {
-    message_service_to_middleware: Option<mpsc::Sender<MessageServiceResponse>>,
     middleware_from_message_service: Option<mpsc::Receiver<MessageServiceResponse>>,
-    data_service_to_middleware: Option<mpsc::Sender<TableDataVector>>,
     middleware_from_data_service: Option<mpsc::Receiver<TableDataVector>>,
 }
 
 impl SecondLayerMiddlewareBuilder {
-    pub fn message_service_to_middleware(
-        mut self,
-        ch: mpsc::Sender<MessageServiceResponse>,
-    ) -> Self {
-        self.message_service_to_middleware = Some(ch);
-        self
-    }
     pub fn middleware_from_message_service(
         mut self,
         ch: mpsc::Receiver<MessageServiceResponse>,
@@ -45,10 +35,7 @@ impl SecondLayerMiddlewareBuilder {
         self.middleware_from_message_service = Some(ch);
         self
     }
-    pub fn data_service_to_middleware(mut self, ch: mpsc::Sender<TableDataVector>) -> Self {
-        self.data_service_to_middleware = Some(ch);
-        self
-    }
+
     pub fn middleware_from_data_service(mut self, ch: mpsc::Receiver<TableDataVector>) -> Self {
         self.middleware_from_data_service = Some(ch);
         self
@@ -70,15 +57,9 @@ impl SecondLayerMiddlewareBuilder {
             middleware_to_firmware_service: firmware,
             middleware_to_heartbeat_service: heartbeat,
             middleware_to_data_service: data,
-            message_service_to_middleware: self
-                .message_service_to_middleware
-                .ok_or("falta message_service_to_middleware")?,
             middleware_from_message_service: self
                 .middleware_from_message_service
                 .ok_or("falta middleware_from_message_service")?,
-            data_service_to_middleware: self
-                .data_service_to_middleware
-                .ok_or("falta data_service_to_middleware")?,
             middleware_from_data_service: self
                 .middleware_from_data_service
                 .ok_or("falta middleware_from_data_service")?,
@@ -153,10 +134,16 @@ impl SecondLayerMiddleware {
                                 _ => {}
                             }
                         },
+                        MessageServiceResponse::LocalConnected => {
+                            self.middleware_to_fsm_service.connection_event(InternalEvent::LocalConnected).await;
+                        }
+                        MessageServiceResponse::LocalDisconnected => {
+                            self.middleware_to_fsm_service.connection_event(InternalEvent::LocalDisconnected).await;
+                        }
                     }
                 }
                 Some(response) = self.middleware_from_data_service.recv() => {
-                    self.middleware_to_message_service.serialize_batch(response);
+                    self.middleware_to_message_service.serialize_batch(response).await;
                 }
             }
         }

@@ -1,7 +1,8 @@
 use crate::context::domain::AppContext;
+use crate::first_layer::mqtt::domain::MqttHandle;
 use crate::second_layer::database::domain::{DataHandle, HubRow, NetworkRow};
 use crate::second_layer::message::{
-    domain::{LinkageAck, LinkageRequest, Metadata, Network, NetworkAck, Settings},
+    domain::{HelloServer, LinkageAck, LinkageRequest, Metadata, Network, NetworkAck, Settings},
     logic::MessageHandle,
 };
 use crate::third_layer::network::{
@@ -32,17 +33,12 @@ impl NetworkHandle {
         let cmd = InternalNetworkCommand::Net { data };
         let _ = self.tx.send(cmd).await;
     }
-    pub async fn load_in_memory(&self) {
-        let cmd = InternalNetworkCommand::LoadInMemory;
-        let _ = self.tx.send(cmd).await;
-    }
 }
 
 enum InternalNetworkCommand {
     LinkageReq { data: LinkageRequest },
     SettingsServer { data: Settings },
     Net { data: Network },
-    LoadInMemory,
 }
 
 #[derive(PartialEq, Eq)]
@@ -56,6 +52,7 @@ pub struct NetworkService {
     context: AppContext,
     db_handle: DataHandle,
     msg_handle: MessageHandle,
+    mqtt_handle: MqttHandle,
 }
 
 impl NetworkService {
@@ -65,6 +62,7 @@ impl NetworkService {
         context: AppContext,
         db_handle: DataHandle,
         msg_handle: MessageHandle,
+        mqtt_handle: MqttHandle,
     ) -> (Self, NetworkHandle) {
         let (tx, rx) = mpsc::channel(50);
         let service = Self {
@@ -73,14 +71,23 @@ impl NetworkService {
             context,
             db_handle,
             msg_handle,
+            mqtt_handle,
         };
         let handle = NetworkHandle { tx };
         (service, handle)
     }
 
     pub async fn run(mut self, shutdown: CancellationToken) {
-        let (tx, mut rx_response) = mpsc::channel::<NetworkServiceResponse>(10);
+        let (tx, mut rx_response) = mpsc::channel::<NetworkServiceResponse>(5);
         let mut hub_hash_aux: HashMap<String, HashSet<HubRow>> = HashMap::new();
+
+        load_memory(&tx, &self.context, &self.db_handle, &self.mqtt_handle).await;
+        let metadata = create_metadata(&self.context);
+        let msg = HelloServer {
+            metadata,
+            hello: true,
+        };
+        self.msg_handle.serialize_hello_server(msg).await;
 
         loop {
             tokio::select! {
@@ -105,7 +112,8 @@ impl NetworkService {
                                 &self.context,
                                 &self.db_handle,
                                 data,
-                                &self.msg_handle
+                                &self.msg_handle,
+                                &self.mqtt_handle
                             ).await;
                         }
                         InternalNetworkCommand::SettingsServer { data } => {
@@ -113,13 +121,7 @@ impl NetworkService {
                                 data,
                                 &self.msg_handle,
                                 &mut hub_hash_aux,
-                            ).await;
-                        }
-                        InternalNetworkCommand::LoadInMemory => {
-                            load_memory(
-                                &tx,
-                                &self.context,
-                                &self.db_handle,
+                                &self.db_handle
                             ).await;
                         }
                     }
@@ -139,6 +141,7 @@ async fn network(
     db_handle: &DataHandle,
     network: Network,
     msg_handle: &MessageHandle,
+    mqtt_handle: &MqttHandle,
 ) {
     let action = {
         let manager = app_context.net_man.read().await;
@@ -165,6 +168,7 @@ async fn network(
         msg_handle,
         app_context,
         network.id_network.clone(),
+        mqtt_handle,
     )
     .await;
 }
@@ -216,6 +220,7 @@ async fn handle_event(
     msg_handle: &MessageHandle,
     app_context: &AppContext,
     id: String,
+    mqtt_handle: &MqttHandle,
 ) {
     match net_chan {
         NetworkChanged::Delete { id } => {
@@ -237,6 +242,7 @@ async fn handle_event(
                     id_network: id,
                     code_of_ack: 200,
                 };
+                mqtt_handle.update_networks().await;
                 msg_handle.serialize_network_ack(msg).await;
             }
         }
@@ -245,7 +251,7 @@ async fn handle_event(
             before,
             after,
         } => {
-            let result = db_handle.save_network(data).await;
+            let result = db_handle.update_network(data).await;
             if result {
                 if before == false && after == true {
                     let metadata = create_metadata(app_context);
@@ -254,6 +260,7 @@ async fn handle_event(
                         id_network: id,
                         code_of_ack: 300,
                     };
+                    mqtt_handle.update_networks().await;
                     msg_handle.serialize_network_ack(msg).await;
                 } else if before == true && after == false {
                     let metadata = create_metadata(app_context);
@@ -262,6 +269,7 @@ async fn handle_event(
                         id_network: id,
                         code_of_ack: 400,
                     };
+                    mqtt_handle.update_networks().await;
                     msg_handle.serialize_network_ack(msg).await;
                 }
             } else {
@@ -295,6 +303,7 @@ async fn handle_event(
                         id_network: id,
                         code_of_ack: 100,
                     };
+                    mqtt_handle.update_networks().await;
                     msg_handle.serialize_network_ack(msg).await;
                 } else {
                     let metadata = create_metadata(app_context);
@@ -314,6 +323,7 @@ async fn handle_event(
                         id_network: id,
                         code_of_ack: 100,
                     };
+                    mqtt_handle.update_networks().await;
                     msg_handle.serialize_network_ack(msg).await;
                 } else {
                     let metadata = create_metadata(app_context);
@@ -333,12 +343,15 @@ async fn settings_from_server(
     settings: Settings,
     msg_handle: &MessageHandle,
     hub_hash_aux: &mut HashMap<String, HashSet<HubRow>>,
+    db_handle: &DataHandle,
 ) {
     let id = settings.network.clone();
     hub_hash_aux
         .entry(settings.metadata.sender_user_id.clone())
         .or_default()
-        .insert(settings.clone().cast_settings_to_hub_row(id));
+        .insert(settings.clone().cast_settings_to_hub_row(id.clone()));
+    let hub_row = settings.clone().cast_settings_to_hub_row(id);
+    db_handle.save_new_hub(hub_row).await;
     msg_handle.serialize_new_config_hub(settings.clone()).await;
 }
 
@@ -400,6 +413,7 @@ async fn load_memory(
     tx: &mpsc::Sender<NetworkServiceResponse>,
     app_context: &AppContext,
     db_handle: &DataHandle,
+    mqtt_handle: &MqttHandle,
 ) {
     let result = db_handle.get_total_networks().await;
     match result.networks {
@@ -424,12 +438,14 @@ async fn load_memory(
                             "estado cargado: {} redes en sistema y {} Hubs registrados",
                             total_networks, total_hubs
                         );
+                        mqtt_handle.networks_ready().await;
                         if tx.send(NetworkServiceResponse::Run).await.is_err() {
                             error!("no se pudo enviar Run")
                         }
                     }
                 }
                 None => {
+                    mqtt_handle.networks_ready().await;
                     info!(
                         "estado cargado: {} redes en sistema. Ningún Hub aun",
                         total_networks

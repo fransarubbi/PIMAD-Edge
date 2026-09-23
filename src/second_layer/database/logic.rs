@@ -69,7 +69,13 @@ pub async fn delete_network(repo: &Repository, id: String) -> NetworkResult {
         zero_networks: false,
     };
     match repo.delete_network(&id).await {
-        Ok(_) => res.result = true,
+        Ok(_) => match repo.delete_hub_network(&id).await {
+            Ok(_) => res.result = true,
+            Err(e) => {
+                error!("no se pudo eliminar los hubs de la red con id: {id}. {e}");
+                res.result = false;
+            }
+        },
         Err(e) => {
             error!("no se pudo eliminar red con id: {id}. {e}");
             res.result = false;

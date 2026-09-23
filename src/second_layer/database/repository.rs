@@ -47,8 +47,7 @@ use crate::second_layer::database::tables::balance_epoch::{
     create_table_balance_epoch, get_balance_epoch, insert_balance_epoch,
 };
 use crate::second_layer::database::tables::hub::{
-    count_hubs, create_table_hub, delete_hub_according_to_id, delete_hub_according_to_network,
-    get_all_hubs, insert_hub_table,
+    count_hubs, create_table_hub, delete_hub_according_to_network, get_all_hubs, insert_hub_table,
 };
 use crate::second_layer::database::tables::measurement::{
     create_table_measurement, insert_measurement, pop_batch_measurement,
@@ -264,13 +263,6 @@ impl Repository {
     /// Usada cuando se elimina la red y se deben eliminar los nodos asociados.
     pub async fn delete_hub_network(&self, id: &str) -> Result<(), sqlx::Error> {
         delete_hub_according_to_network(&self.pool, id).await?;
-        Ok(())
-    }
-
-    /// Elimina un Hub de la base de datos según id del Hub.
-    /// Usada cuando se desea eliminar un nodo de una red, por ejemplo por estar dañado.
-    pub async fn delete_hub(&self, id: &str) -> Result<(), sqlx::Error> {
-        delete_hub_according_to_id(&self.pool, id).await?;
         Ok(())
     }
 

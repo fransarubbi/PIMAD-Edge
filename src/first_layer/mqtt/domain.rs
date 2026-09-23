@@ -20,26 +20,35 @@ use tracing::{error, info};
 
 #[derive(Clone)]
 pub struct MqttHandle {
-    tx: mpsc::Sender<MqttServiceCommand>,
+    tx: mpsc::Sender<InternalMqttCommand>,
 }
 
 impl MqttHandle {
     pub async fn send_serialized(&self, data: SerializedMessage) {
-        let _ = self.tx.send(MqttServiceCommand::Serialized(data)).await;
+        let _ = self.tx.send(InternalMqttCommand::Serialized(data)).await;
+    }
+    pub async fn networks_ready(&self) {
+        let _ = self.tx.send(InternalMqttCommand::NetworksReady).await;
+    }
+    pub async fn update_networks(&self) {
+        let _ = self.tx.send(InternalMqttCommand::NetworksUpdated).await;
     }
 }
 
-/// Comandos de control aceptados por el servicio MQTT.
-///
-/// Esta enumeración multiplexa los distintos tipos de interacciones que el `Core`
-/// puede tener con el subsistema MQTT.
-pub enum MqttServiceCommand {
+enum InternalMqttCommand {
     /// Un mensaje de datos ya procesado y serializado, listo para ser publicado.
     Serialized(SerializedMessage),
     /// Señal que indica que el gestor de red ha terminado de cargar la topología inicial en memoria.
     NetworksReady,
     /// Señal que indica que la topología de la red ha cambiado (nuevos Hubs, bajas, etc.)
     /// y las suscripciones deben ser reevaluadas.
+    NetworksUpdated,
+}
+
+/// Igual que InternalMqttCommand pero para uso del modulo. Se busca simplicidad en el diseño de logic.rs.
+/// El exterior debe usar MqttHandle.
+pub enum MqttServiceCommand {
+    NetworksReady,
     NetworksUpdated,
 }
 
@@ -52,7 +61,7 @@ pub struct MqttService {
     /// Canal para enviar eventos generados por el cliente MQTT (conexiones, mensajes entrantes) al Core.
     sender: mpsc::Sender<InternalEvent>,
     /// Canal por donde se reciben comandos (`MqttServiceCommand`) provenientes del Core.
-    receiver: mpsc::Receiver<MqttServiceCommand>,
+    rx: mpsc::Receiver<InternalMqttCommand>,
     /// Contexto global compartido de la aplicación.
     context: AppContext,
 }
@@ -64,16 +73,15 @@ impl MqttService {
     /// * `sender` - Extremo de transmisión hacia el bus central del Core.
     /// * `receiver` - Extremo de recepción para escuchar comandos del Core.
     /// * `context` - Estado global (configuraciones, base de datos, gestor de red).
-    pub fn new(
-        sender: mpsc::Sender<InternalEvent>,
-        receiver: mpsc::Receiver<MqttServiceCommand>,
-        context: AppContext,
-    ) -> Self {
-        Self {
+    pub fn new(sender: mpsc::Sender<InternalEvent>, context: AppContext) -> (Self, MqttHandle) {
+        let (tx, rx) = mpsc::channel(10);
+        let service = Self {
             sender,
-            receiver,
+            rx,
             context,
-        }
+        };
+        let handle = MqttHandle { tx };
+        (service, handle)
     }
 
     /// Inicia el bucle principal de eventos del supervisor.
@@ -85,9 +93,9 @@ impl MqttService {
     /// # Argumentos
     /// * `shutdown` - Token utilizado para detener de forma segura el bucle y la tarea hija.
     pub async fn run(mut self, shutdown: CancellationToken) {
-        let (tx, mut rx_response) = mpsc::channel::<InternalEvent>(100);
-        let (tx_command, rx_msg) = mpsc::channel::<SerializedMessage>(100);
-        let (tx_command_net, rx_net) = mpsc::channel::<MqttServiceCommand>(100);
+        let (tx, mut rx_response) = mpsc::channel::<InternalEvent>(50);
+        let (tx_command, rx_msg) = mpsc::channel::<SerializedMessage>(50);
+        let (tx_command_net, rx_net) = mpsc::channel::<MqttServiceCommand>(50);
 
         tokio::spawn(mqtt(
             tx,
@@ -103,20 +111,20 @@ impl MqttService {
                     info!("shutdown recibido MqttService");
                     break;
                 }
-                Some(cmd) = self.receiver.recv() => {
+                Some(cmd) = self.rx.recv() => {
                     match cmd {
-                        MqttServiceCommand::Serialized(msg) => {
+                        InternalMqttCommand::Serialized(msg) => {
                             if tx_command.send(msg).await.is_err() {
                                 error!("no se pudo enviar SerializedMessage desde MqttService");
                             }
                         },
-                        MqttServiceCommand::NetworksReady => {
-                            if tx_command_net.send(cmd).await.is_err() {
+                        InternalMqttCommand::NetworksReady => {
+                            if tx_command_net.send(MqttServiceCommand::NetworksReady).await.is_err() {
                                 error!("no se pudo enviar NetworksReady desde MqttService");
                             }
                         },
-                        MqttServiceCommand::NetworksUpdated => {
-                            if tx_command_net.send(cmd).await.is_err() {
+                        InternalMqttCommand::NetworksUpdated => {
+                            if tx_command_net.send(MqttServiceCommand::NetworksUpdated).await.is_err() {
                                 error!("no se pudo enviar NetworksUpdated desde MqttService");
                             }
                         }

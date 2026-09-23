@@ -56,19 +56,6 @@ impl FsmHandle {
             Err(_) => false,
         }
     }
-    pub async fn delete_runtime(&self) -> bool {
-        let (response_tx, response_rx) = oneshot::channel();
-        let cmd = InternalFsmCommand::DeleteRuntime {
-            respond_to: response_tx,
-        };
-        if self.tx.send(cmd).await.is_err() {
-            return false;
-        }
-        match response_rx.await {
-            Ok(_) => true,
-            Err(_) => false,
-        }
-    }
 }
 
 enum InternalFsmCommand {
@@ -77,7 +64,6 @@ enum InternalFsmCommand {
     QueueSafe { data: EmptyQueueSafeMode },
     ConnectionEvent { data: InternalEvent },
     CreateRuntime { respond_to: oneshot::Sender<bool> },
-    DeleteRuntime { respond_to: oneshot::Sender<bool> },
 }
 
 enum EventFsm {
@@ -228,15 +214,6 @@ impl FsmService {
                                         error!("no se pudo enviar Connection a fsm");
                                     }
                                 }
-                                InternalFsmCommand::DeleteRuntime { respond_to } => {
-                                    if let Some(rt) = runtime.take() {
-                                        rt.cancel_token.cancel();
-                                        for h in rt.handles {
-                                            let _ = tokio::time::timeout(Duration::from_secs(2), h).await;
-                                        }
-                                    }
-                                    let _ = respond_to.send(true);
-                                }
                                 _ => {}
                             }
                         }
@@ -285,7 +262,7 @@ impl FsmService {
 /// 3.  **Ping/Pong:** Responde automáticamente a solicitudes de diagnóstico de red.
 /// 4.  **Ejecución de Acciones:** Delega las acciones recibidas a `handle_action`.
 #[instrument(name = "handle_events_and_actions", skip_all)]
-pub async fn handle_events_and_actions(
+async fn handle_events_and_actions(
     tx_to_fsm: mpsc::Sender<Event>,
     tx_to_timer: mpsc::Sender<Event>,
     tx_to_heartbeat: mpsc::Sender<Action>,
@@ -437,15 +414,21 @@ async fn handle_action(
                 {
                     error!("no se pudo enviar StateGlobal::BalanceMode a edge_state");
                 }
-                loop {
-                    match db_handle.get_epoch().await {
-                        Some(e) => {
-                            session.set_epoch(e);
-                            break;
-                        }
-                        None => {
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                        }
+                let res: bool;
+                match db_handle.get_epoch().await {
+                    Some(e) => {
+                        session.set_epoch(e + 1);
+                        res = db_handle.save_epoch(e + 1).await;
+                    }
+                    None => res = false,
+                }
+                if res {
+                    if tx_to_fsm.send(Event::BalanceEpochOk).await.is_err() {
+                        error!("no se pudo enviar Event::BalanceEpochOk");
+                    }
+                } else {
+                    if tx_to_fsm.send(Event::BalanceEpochNotOk).await.is_err() {
+                        error!("no se pudo enviar Event::BalanceEpochNotOk");
                     }
                 }
             }

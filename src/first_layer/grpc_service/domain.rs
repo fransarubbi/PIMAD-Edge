@@ -54,8 +54,8 @@ impl GrpcHandle {
 pub struct GrpcService {
     /// Canal de salida hacia el Core del sistema (eventos de red y mensajes entrantes).
     sender: mpsc::Sender<InternalEvent>,
-    /// Canal de entrada desde el Core (mensajes a subir al servidor).
-    receiver: mpsc::Receiver<FromEdge>,
+    /// Canal de entrada
+    rx: mpsc::Receiver<FromEdge>,
     /// Contexto global de la aplicación (configuración, secretos, base de datos).
     context: AppContext,
 }
@@ -64,16 +64,15 @@ impl GrpcService {
     /// Crea una nueva instancia de `GrpcService`.
     ///
     /// No inicia la conexión. Se debe llamar a `run()` explícitamente.
-    pub fn new(
-        sender: mpsc::Sender<InternalEvent>,
-        receiver: mpsc::Receiver<FromEdge>,
-        context: AppContext,
-    ) -> Self {
-        Self {
+    pub fn new(sender: mpsc::Sender<InternalEvent>, context: AppContext) -> (Self, GrpcHandle) {
+        let (tx, rx) = mpsc::channel(10);
+        let service = Self {
             sender,
-            receiver,
+            rx,
             context,
-        }
+        };
+        let handle = GrpcHandle { tx };
+        (service, handle)
     }
 
     /// Inicia el servicio y bloquea la tarea actual de forma asíncrona.
@@ -95,7 +94,7 @@ impl GrpcService {
                     break;
                 }
 
-                Some(edge_upload) = self.receiver.recv() => {
+                Some(edge_upload) = self.rx.recv() => {
                     if tx.send(edge_upload).await.is_err() {
                         error!("no se pudo enviar EdgeUpload a remote_grpc");
                     }

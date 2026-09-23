@@ -148,6 +148,8 @@ impl MessageHandle {
 pub enum MessageServiceResponse {
     FromHub(HubMessage),
     FromServer(ServerMessage),
+    LocalDisconnected,
+    LocalConnected,
 }
 
 pub struct MessageService {
@@ -356,6 +358,27 @@ impl MessageService {
                         }
                         InternalEvent::LocalDisconnected | InternalEvent::LocalConnected => {
                             local_status = to_parse;
+                            match &local_status {
+                                InternalEvent::LocalDisconnected => {
+                                    if self.sender
+                                        .send(MessageServiceResponse::LocalDisconnected)
+                                        .await
+                                        .is_err()
+                                    {
+                                        error!("no se pudo enviar LocalDisconnected desde MessageService");
+                                    }
+                                }
+                                InternalEvent::LocalConnected => {
+                                    if self.sender
+                                        .send(MessageServiceResponse::LocalConnected)
+                                        .await
+                                        .is_err()
+                                    {
+                                        error!("no se pudo enviar LocalConnected desde MessageService");
+                                    }
+                                }
+                                _ => {}
+                            }
                         }
                     }
                 }
@@ -400,23 +423,6 @@ async fn convert_to_proto_upload(
     msg: InternalMessageCommand,
     edge_id: String,
 ) {
-    /*
-    * let metadata = Metadata {
-        sender_user_id: app_context.system.id_edge.clone(),
-        destination_id: "server0".to_string(),
-        timestamp: Utc::now().timestamp(),
-    };
-    let msg = NetworkAck {
-        metadata,
-        id_network: code.0,
-        code_of_ack: code.1,
-    };
-    if let Some(proto_msg) = convert_to_proto_upload(ServerMessage::NetworkAck(msg), app_context.system.id_edge.clone()) {
-        if tx_to_server.send(MessageServiceResponse::EdgeUpload(proto_msg)).await.is_err() {
-            error!("no se puede enviar mensaje EdgeUpload al cliente gRPC");
-        }
-    }
-    */
     match msg {
         InternalMessageCommand::SerializeHubFirmwareResult { data } => {
             let payload = {

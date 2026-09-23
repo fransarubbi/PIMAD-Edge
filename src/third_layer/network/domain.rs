@@ -109,25 +109,6 @@ impl NetworkManager {
         }
     }
 
-    /// Eliminar un Hub específico de una red.
-    pub fn remove_hub(&mut self, id_network: &str, id_hub: &str) {
-        if let Some(hubs_set) = self.hubs.get_mut(id_network) {
-            let len_before = hubs_set.len();
-            hubs_set.retain(|hub| hub.id != id_hub);
-
-            if hubs_set.len() < len_before {
-                info!("Hub '{}' eliminado de la red '{}'.", id_hub, id_network);
-            } else {
-                warn!("El Hub '{}' no existía en la red '{}'.", id_hub, id_network);
-            }
-        } else {
-            warn!(
-                "Intento de borrar hub en red inexistente: '{}'.",
-                id_network
-            );
-        }
-    }
-
     /// Preguntar si existe un determinado Hub por ID.
     pub fn search_hub(&self, id_net: &str, id_hub: &str) -> bool {
         if !self.networks.contains_key(id_net) {
@@ -204,8 +185,6 @@ pub struct Network {
     pub topic_new_setting: Topic,
     pub topic_new_firmware: Topic,
     pub topic_setting_ok: Topic,
-    pub topic_delete_hub: Topic,
-    pub topic_active_hub: Topic,
 
     /// Indica si la red está en procesamiento activo o pausado.
     pub active: bool,
@@ -227,8 +206,6 @@ impl Network {
         let t_new_setting = format!("iot/{id_network}/new_setting");
         let t_new_firmware = format!("iot/{id_network}/new_firmware");
         let t_setting_ok = format!("iot/{id_network}/new_setting_ok");
-        let t_delete_hub = format!("iot/{id_network}/delete_hub");
-        let t_active = format!("iot/{id_network}/active");
         let t_queue_empty = format!("iot/{id_network}/hub/+/empty_queue");
         let t_queue_empty_safe = format!("iot/{id_network}/hub/+/empty_queue_safe");
 
@@ -246,8 +223,6 @@ impl Network {
             topic_new_setting: Topic::new(t_new_setting, 0),
             topic_new_firmware: Topic::new(t_new_firmware, 2),
             topic_setting_ok: Topic::new(t_setting_ok, 0),
-            topic_delete_hub: Topic::new(t_delete_hub, 0),
-            topic_active_hub: Topic::new(t_active, 1),
             topic_queue_empty: Topic::new(t_queue_empty, 1),
             topic_queue_empty_safe: Topic::new(t_queue_empty_safe, 1),
             active,
@@ -276,13 +251,6 @@ pub enum NetworkChanged {
     Delete {
         id: String,
     },
-}
-
-/// Eventos de mutación de estado en Hubs para sincronizar la BD.
-#[derive(Debug, PartialEq, Clone)]
-pub enum HubChanged {
-    Insert(HubRow),
-    Delete(String),
 }
 
 /// Representación liviana en memoria caché de un dispositivo nodo/Hub.

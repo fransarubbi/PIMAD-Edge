@@ -11,6 +11,7 @@
 //! mensajes periódicos y notificar al resto del sistema vía un canal `watch`.
 
 use crate::config::heartbeat::*;
+use crate::second_layer::database::domain::DataHandle;
 use crate::second_layer::message::domain::Heartbeat;
 use crate::system::domain::InternalEvent;
 use crate::third_layer::heartbeat::domain::{
@@ -40,6 +41,7 @@ pub async fn heartbeat(
     tx_to_timer: mpsc::Sender<Event>,
     mut rx_from_server: mpsc::Receiver<Heartbeat>,
     mut rx_fsm: mpsc::Receiver<Vec<Action>>,
+    db_handle: DataHandle,
     shutdown: CancellationToken,
 ) {
     loop {
@@ -74,10 +76,18 @@ pub async fn heartbeat(
                                     if tx.send(InternalEvent::ServerConnected).await.is_err() {
                                         error!("no se pudo distribuir el estado de ServerConnected");
                                     }
+                                    let result = db_handle.send_status_connection_server(InternalEvent::ServerConnected).await;
+                                    if !result {
+                                        error!("no se pudo distribuir el estado de ServerConnected a DataHandle desde Heartbeat");
+                                    }
                                 }
                                 if new_status == Status::Disconnected {
                                     if tx.send(InternalEvent::ServerDisconnected).await.is_err() {
                                         error!("no se pudo distribuir el estado de ServerDisconnected");
+                                    }
+                                    let result = db_handle.send_status_connection_server(InternalEvent::ServerDisconnected).await;
+                                    if !result {
+                                        error!("no se pudo distribuir el estado de ServerDisconnected a DataHandle desde Heartbeat");
                                     }
                                 }
                             }

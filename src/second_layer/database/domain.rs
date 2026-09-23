@@ -56,10 +56,6 @@ enum InternalDataCommand {
         data: HubRow,
         respond_to: oneshot::Sender<bool>,
     },
-    DeleteHub {
-        id: String,
-        respond_to: oneshot::Sender<bool>,
-    },
     SaveNetwork {
         data: NetworkRow,
         respond_to: oneshot::Sender<bool>,
@@ -139,20 +135,6 @@ impl DataHandle {
         let (response_tx, response_rx) = oneshot::channel();
         let cmd = InternalDataCommand::SaveNewHub {
             data,
-            respond_to: response_tx,
-        };
-        if self.tx.send(cmd).await.is_err() {
-            return false;
-        }
-        match response_rx.await {
-            Ok(_) => true,
-            Err(_) => false,
-        }
-    }
-    pub async fn delete_hub(&self, id: String) -> bool {
-        let (response_tx, response_rx) = oneshot::channel();
-        let cmd = InternalDataCommand::DeleteHub {
-            id,
             respond_to: response_tx,
         };
         if self.tx.send(cmd).await.is_err() {
@@ -275,7 +257,7 @@ pub struct DataService {
 
 impl DataService {
     pub fn new(tx_batch: mpsc::Sender<TableDataVector>, repo: Repository) -> (Self, DataHandle) {
-        let (tx, rx) = mpsc::channel(50);
+        let (tx, rx) = mpsc::channel(10);
         let service = Self { tx_batch, rx, repo };
         let handle = DataHandle { tx };
         (service, handle)
@@ -352,13 +334,6 @@ impl DataService {
                             let result = save_hub(&self.repo, data).await;
                             let _ = respond_to.send(result);
                         }
-                        InternalDataCommand::DeleteHub { id, respond_to } => {
-                            let result = match self.repo.delete_hub(&id).await {
-                                Ok(_) => true,
-                                Err(_) => false,
-                            };
-                            let _ = respond_to.send(result);
-                        }
                         InternalDataCommand::SaveNetwork { data, respond_to } => {
                             let result = match self.repo.insert_network(data.clone()).await {
                                 Ok(_) => true,
@@ -405,10 +380,6 @@ impl DataService {
     async fn flush_to_db(&self, tdv: &mut TableDataVector) {
         let _ = self.repo.insert(tdv).await;
         tdv.clear();
-    }
-
-    async fn insert_hub_directly(&self, hub: HubRow) {
-        let _ = self.repo.insert_hub(hub).await;
     }
 
     /// Hace pop_batch() hasta vaciar la DB y los envía por el canal tx

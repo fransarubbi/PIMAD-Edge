@@ -17,6 +17,7 @@
 //! 3. **NotHeartbeatYet:** Se perdió un latido (advertencia).
 //! 4. **DeadServer:** Se agotó el tiempo de espera máximo (desconexión confirmada).
 
+use crate::second_layer::database::domain::DataHandle;
 use crate::second_layer::message::domain::Heartbeat;
 use crate::system::domain::InternalEvent;
 use crate::third_layer::heartbeat::logic::{heartbeat, run_fsm_heartbeat};
@@ -39,11 +40,22 @@ impl HeartbeatHandle {
 pub struct HeartbeatService {
     sender: mpsc::Sender<InternalEvent>,
     rx: mpsc::Receiver<Heartbeat>,
+    db_handle: DataHandle,
 }
 
 impl HeartbeatService {
-    pub fn new(sender: mpsc::Sender<InternalEvent>, rx: mpsc::Receiver<Heartbeat>) -> Self {
-        Self { sender, rx }
+    pub fn new(
+        sender: mpsc::Sender<InternalEvent>,
+        db_handle: DataHandle,
+    ) -> (Self, HeartbeatHandle) {
+        let (tx, rx) = mpsc::channel(10);
+        let service = Self {
+            sender,
+            rx,
+            db_handle,
+        };
+        let handle = HeartbeatHandle { tx };
+        (service, handle)
     }
 
     pub async fn run(mut self, shutdown: CancellationToken) {
@@ -60,6 +72,7 @@ impl HeartbeatService {
             tx_to_timer,
             rx_from_server,
             rx_fsm,
+            self.db_handle.clone(),
             shutdown.clone(),
         ));
 

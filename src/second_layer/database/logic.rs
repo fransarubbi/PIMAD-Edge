@@ -1,6 +1,5 @@
 use super::domain::{AllNetworksResult, HubRow, NetworkResult, NetworkRow, TableDataVector};
-use crate::second_layer::database::repository::Repository;
-use crate::second_layer::message::domain::HubMessage;
+use crate::second_layer::{database::repository::Repository, message::domain::HubMessage};
 use tracing::{error, info};
 
 pub async fn update_network(repo: &Repository, network: NetworkRow) -> bool {

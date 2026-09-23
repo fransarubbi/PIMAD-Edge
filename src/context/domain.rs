@@ -5,9 +5,8 @@
 //! agrupando los recursos que deben ser accesibles por múltiples tareas concurrentes
 //! (Base de datos, Configuración, Caché en memoria).
 
-use crate::quorum::domain::ProtocolSettings;
 use crate::system::domain::System;
-use crate::third_layer::network::domain::NetworkManager;
+use crate::third_layer::{network::domain::NetworkManager, quorum::domain::ProtocolSettings};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 

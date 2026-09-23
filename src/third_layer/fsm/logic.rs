@@ -1,6 +1,5 @@
 use crate::config::fsm::PERCENTAGE;
 use crate::context::domain::AppContext;
-use crate::quorum::domain::ProtocolSettings;
 use crate::second_layer::database::domain::DataHandle;
 use crate::second_layer::message::domain::{
     EdgeState, HandshakeToHub, Heartbeat, HubMessage, Metadata, PhaseNotification, StateToHub,
@@ -14,6 +13,7 @@ use crate::third_layer::fsm::domain::{
     Action, Event, FsmState, StateGlobal, StateOfSession, SubStateBalanceMode, SubStatePhase,
     SubStateQuorum, Transition, UpdateSession, fsm_watchdog_timer,
 };
+use crate::third_layer::quorum::domain::ProtocolSettings;
 use chrono::Utc;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;

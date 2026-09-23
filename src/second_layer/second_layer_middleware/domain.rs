@@ -1,5 +1,6 @@
-use crate::second_layer::database::domain::TableDataVector;
-use crate::second_layer::message::logic::MessageServiceResponse;
+use crate::second_layer::{
+    database::domain::TableDataVector, message::logic::MessageServiceResponse,
+};
 use tokio::sync::mpsc;
 use tracing::info;
 

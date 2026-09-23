@@ -3,9 +3,9 @@
 
 use crate::config::files::{PROTOCOL_TOML_PATH, SYSTEM_TOML_PATH};
 use crate::context::domain::AppContext;
-use crate::quorum::domain::ProtocolSettings;
 use crate::system::domain::{ErrorType, System};
 use crate::third_layer::network::domain::NetworkManager;
+use crate::third_layer::quorum::domain::ProtocolSettings;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;

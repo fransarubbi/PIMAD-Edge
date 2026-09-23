@@ -1,9 +1,11 @@
 use crate::config::sqlite::{BATCH_SIZE, FLUSH_INTERVAL};
-use crate::second_layer::database::{
-    logic::{all_networks, delete_network, save_hub, sort_by_vectors, update_network},
-    repository::Repository,
+use crate::second_layer::{
+    database::{
+        logic::{all_networks, delete_network, save_hub, sort_by_vectors, update_network},
+        repository::Repository,
+    },
+    message::domain::{AlertAir, AlertTh, HubMessage, Measurement, Monitor},
 };
-use crate::second_layer::message::domain::{AlertAir, AlertTh, HubMessage, Measurement, Monitor};
 use crate::system::domain::InternalEvent;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;

@@ -1,7 +1,6 @@
 mod config;
 mod context;
 mod first_layer;
-mod quorum;
 mod second_layer;
 mod system;
 mod third_layer;
@@ -42,7 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let tracing_handle = init_tracing();
 
-    info!("Iniciando sistema Edge...");
+    info!("Iniciando sistema PIMAD Edge...");
 
     let app_context = init_fsm().await?;
 

@@ -22,18 +22,20 @@
 
 use crate::config::grpc_service::*;
 use crate::context::domain::AppContext;
-use crate::grpc::edge_service_client::EdgeServiceClient;
-use crate::grpc::{FromEdge, ToEdge};
+use crate::grpc::{
+    edge_service_client::EdgeServiceClient,
+    {FromEdge, ToEdge},
+};
 use crate::system::domain::{ErrorType, InternalEvent};
-use std::fs;
-use std::time::Duration;
+use std::{fs, time::Duration};
 use tokio::sync::mpsc;
-use tokio_stream::StreamExt;
-use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tokio_util::sync::CancellationToken;
-use tonic::Request;
-use tonic::codec::CompressionEncoding;
-use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
+use tonic::{
+    Request,
+    codec::CompressionEncoding,
+    transport::{Certificate, Channel, ClientTlsConfig, Identity},
+};
 use tracing::{error, info, instrument, warn};
 
 #[derive(Clone)]

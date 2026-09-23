@@ -3,4 +3,5 @@ pub mod fsm;
 pub mod heartbeat;
 pub mod metrics;
 pub mod network;
+pub mod quorum;
 pub mod third_layer_middleware;

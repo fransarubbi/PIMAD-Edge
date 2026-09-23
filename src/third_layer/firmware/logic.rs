@@ -5,7 +5,7 @@
 
 use crate::config::firmware::OTA_TIMEOUT;
 use crate::context::domain::AppContext;
-use crate::second_layer::message::domain::UpdateHubFirmware;
+use crate::second_layer::message::domain::{FirmwareEdgeResult, UpdateHubFirmware};
 use crate::second_layer::message::{
     domain::{
         FirmwareHubAck, FirmwareHubResult, Metadata, UpdateEdgeFirmware, UpdateFirmwareRequestHub,
@@ -41,6 +41,7 @@ pub async fn edge_ota(
     mut rx: mpsc::Receiver<UpdateEdgeFirmware>,
     handle: MessageHandle,
     app_context: AppContext,
+    cancel: CancellationToken,
 ) {
     while let Some(update) = rx.recv().await {
         if update.metadata.destination_id != app_context.system.id_edge {
@@ -53,7 +54,7 @@ pub async fn edge_ota(
                     .repo_owner("fransarubbi")
                     .repo_name("PIMAD-Edge")
                     .bin_name("pimad_edge")
-                    .show_download_progress(true)
+                    .show_download_progress(false)
                     .current_version(env!("CARGO_PKG_VERSION"))
                     .build()?
                     .update()?)
@@ -68,9 +69,9 @@ pub async fn edge_ota(
                     destination_id: "server0".to_string(),
                     timestamp: Utc::now().timestamp(),
                 };
-                let update = UpdateEdgeFirmware {
+                let update = FirmwareEdgeResult {
                     metadata,
-                    version: status.version().to_string(),
+                    error: false,
                 };
 
                 if status.is_updated() {
@@ -78,14 +79,40 @@ pub async fn edge_ota(
                     handle.serialize_edge_firmware_result(update).await;
                     // Dormir 5 segundos para dar tiempo a que el mensaje gRPC salga
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    std::process::exit(0);
+                    info!("iniciando apagado seguro para aplicar actualización OTA...");
+                    cancel.cancel();
                 } else {
                     info!("el sistema ya está en la última versión");
                     handle.serialize_edge_firmware_result(update).await;
                 }
             }
-            Ok(Err(e)) => error!("error en la actualización OTA: {}", e),
-            Err(e) => error!("error al ejecutar la tarea bloqueante (JoinError): {}", e),
+            Ok(Err(e)) => {
+                error!("error en la actualización OTA: {}", e);
+                let metadata = Metadata {
+                    sender_user_id: app_context.system.id_edge.clone(),
+                    destination_id: "server0".to_string(),
+                    timestamp: Utc::now().timestamp(),
+                };
+                let update = FirmwareEdgeResult {
+                    metadata,
+                    error: true,
+                };
+                handle.serialize_edge_firmware_result(update).await;
+            }
+            Err(e) => {
+                error!("error al ejecutar la tarea bloqueante (JoinError): {}", e);
+                error!("error en la actualización OTA: {}", e);
+                let metadata = Metadata {
+                    sender_user_id: app_context.system.id_edge.clone(),
+                    destination_id: "server0".to_string(),
+                    timestamp: Utc::now().timestamp(),
+                };
+                let update = FirmwareEdgeResult {
+                    metadata,
+                    error: true,
+                };
+                handle.serialize_edge_firmware_result(update).await;
+            }
         }
     }
 }

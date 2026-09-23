@@ -338,6 +338,14 @@ pub struct FirmwareHubResult {
     pub error: String,
 }
 
+/// Mensaje indicando el resultado de todo el proceso de actualizacion de firmware de una red.
+/// Edge -> Server.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FirmwareEdgeResult {
+    pub metadata: Metadata,
+    pub error: bool,
+}
+
 // ======= Grupo de mensajes de vinculacion =======
 
 /// Mensaje de solicitud de linkage proveniente de un Hub. Hub -> Edge.

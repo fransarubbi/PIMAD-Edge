@@ -29,7 +29,7 @@ message FromEdge {
     EdgeState edge_state = 15;
     NetworkAck network_ack = 16;
     HubState hub_state = 17;
-    UpdateEdgeFirmware update_edge_firmware = 18;
+    FirmwareEdgeResult firmware_edge_result = 18;
   }
 }
 
@@ -161,6 +161,11 @@ message UpdateFirmware {
 message UpdateEdgeFirmware {
     Metadata metadata = 1;
     string version = 2;
+}
+
+message FirmwareEdgeResult {
+    Metadata metadata = 1;
+    bool error = 2;
 }
 
 message FirmwareHubResult {

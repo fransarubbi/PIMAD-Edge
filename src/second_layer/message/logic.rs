@@ -1,17 +1,19 @@
 use crate::context::domain::AppContext;
-use crate::first_layer::grpc_service::domain::GrpcHandle;
-use crate::first_layer::mqtt::domain::{MqttHandle, PayloadTopic};
+use crate::first_layer::{
+    grpc_service::domain::GrpcHandle,
+    mqtt::domain::{MqttHandle, PayloadTopic},
+};
 use crate::grpc;
 use crate::grpc::from_edge::Payload;
 use crate::grpc::{
     AlertAir as AlertAirGrpc, AlertTh as AlertThGrpc, EdgeMonitor as EdgeMonitorGrpc,
-    EdgeState as EdgeStateGrpc, FirmwareHubResult as FirmwareHubResultGrpc, FromEdge,
-    HelloWorld as HelloWorldGrpc, HubMonitor as HubMonitorGrpc, HubState as HubStateGrpc,
-    Measurement as MeasurementGrpc, NetworkAck as NetworkAckGrpc, Settings as SettingsGrpc,
-    SettingsAck as SettingAckGrpc, ToEdge, UpdateEdgeFirmware as UpdateEdgeFirmwareGrpc, to_edge,
+    EdgeState as EdgeStateGrpc, FirmwareEdgeResult as FirmwareEdgeResultGrpc,
+    FirmwareHubResult as FirmwareHubResultGrpc, FromEdge, HelloWorld as HelloWorldGrpc,
+    HubMonitor as HubMonitorGrpc, HubState as HubStateGrpc, Measurement as MeasurementGrpc,
+    NetworkAck as NetworkAckGrpc, Settings as SettingsGrpc, SettingsAck as SettingAckGrpc, ToEdge,
+    to_edge,
 };
-use crate::second_layer::database::domain::TableDataVector;
-use crate::second_layer::message::domain::*;
+use crate::second_layer::{database::domain::TableDataVector, message::domain::*};
 use crate::system::domain::InternalEvent;
 use rmp_serde::{from_slice, to_vec};
 use serde::Serialize;
@@ -50,7 +52,7 @@ enum InternalMessageCommand {
     SerializeEdgeState { data: EdgeState },
     SerializeNetworkAck { data: NetworkAck },
     SerializeHubState { data: HubState },
-    SerializeEdgeFirmwareResult { data: UpdateEdgeFirmware },
+    SerializeEdgeFirmwareResult { data: FirmwareEdgeResult },
 }
 
 #[derive(Clone)]
@@ -139,7 +141,7 @@ impl MessageHandle {
         let cmd = InternalMessageCommand::SerializeHubState { data };
         let _ = self.tx.send(cmd).await;
     }
-    pub async fn serialize_edge_firmware_result(&self, data: UpdateEdgeFirmware) {
+    pub async fn serialize_edge_firmware_result(&self, data: FirmwareEdgeResult) {
         let cmd = InternalMessageCommand::SerializeEdgeFirmwareResult { data };
         let _ = self.tx.send(cmd).await;
     }
@@ -443,13 +445,13 @@ async fn convert_to_proto_upload(
         InternalMessageCommand::SerializeEdgeFirmwareResult { data } => {
             let payload = {
                 debug!("serializando mensaje UpdateEdgeFirmware para el servidor");
-                Some(Payload::UpdateEdgeFirmware(UpdateEdgeFirmwareGrpc {
+                Some(Payload::FirmwareEdgeResult(FirmwareEdgeResultGrpc {
                     metadata: Some(grpc::Metadata {
                         sender_user_id: data.metadata.sender_user_id,
                         destination_id: data.metadata.destination_id,
                         timestamp: data.metadata.timestamp,
                     }),
-                    version: data.version,
+                    error: data.error,
                 }))
             };
             generate_edge_upload(handle, payload, edge_id).await;

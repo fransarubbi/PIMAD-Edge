@@ -30,9 +30,7 @@ use crate::third_layer::network::domain::NetworkManager;
 use rumqttc::{
     AsyncClient, Event, EventLoop, Incoming, MqttOptions, QoS, TlsConfiguration, Transport,
 };
-use std::collections::HashMap;
-use std::fs;
-use std::time::Duration;
+use std::{collections::HashMap, fs, time::Duration};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument};

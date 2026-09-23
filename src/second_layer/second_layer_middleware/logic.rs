@@ -1,11 +1,15 @@
-use crate::second_layer::database::domain::{DataHandle, TableDataVector};
-use crate::second_layer::message::domain::{HubMessage, ServerMessage};
-use crate::second_layer::message::logic::{MessageHandle, MessageServiceResponse};
+use crate::second_layer::{
+    database::domain::{DataHandle, TableDataVector},
+    message::{
+        domain::{HubMessage, ServerMessage},
+        logic::{MessageHandle, MessageServiceResponse},
+    },
+};
 use crate::system::domain::InternalEvent;
-use crate::third_layer::firmware::domain::FirmwareHandle;
-use crate::third_layer::fsm::logic::FsmHandle;
-use crate::third_layer::heartbeat::domain::HeartbeatHandle;
-use crate::third_layer::network::logic::NetworkHandle;
+use crate::third_layer::{
+    firmware::domain::FirmwareHandle, fsm::logic::FsmHandle, heartbeat::domain::HeartbeatHandle,
+    network::logic::NetworkHandle,
+};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;

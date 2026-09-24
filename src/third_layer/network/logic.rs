@@ -15,6 +15,10 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
+/// Manejador ligero para interactuar con el `NetworkService`.
+///
+/// Permite enviar de forma asíncrona notificaciones de nuevas redes,
+/// solicitudes de vinculación (Linkage) y nuevas configuraciones.
 #[derive(Clone)]
 pub struct NetworkHandle {
     tx: mpsc::Sender<InternalNetworkCommand>,
@@ -41,11 +45,18 @@ enum InternalNetworkCommand {
     Net { data: Network },
 }
 
+/// Respuestas y señales que el `NetworkService` emite hacia otras capas (Middleware/FSM).
 #[derive(PartialEq, Eq)]
 pub enum NetworkServiceResponse {
+    /// Indica que la topología local ha sido cargada y el sistema puede comenzar su ejecución.
     Run,
 }
 
+/// Orquestador y gestor de la topología de red.
+///
+/// Encargado de cargar el estado inicial de las redes, mantener sincronizados
+/// los tópicos MQTT suscritos, evaluar peticiones de vinculación (Linkage) 
+/// y aplicar cambios en la configuración enviados desde la nube.
 pub struct NetworkService {
     sender: mpsc::Sender<NetworkServiceResponse>,
     rx: mpsc::Receiver<InternalNetworkCommand>,

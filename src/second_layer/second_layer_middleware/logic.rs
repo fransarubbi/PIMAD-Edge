@@ -1,3 +1,9 @@
+//! # Lógica del Middleware de la Segunda Capa
+//!
+//! Contiene la implementación del actor que rutea eventos entre los diferentes servicios
+//! del sistema. Este middleware toma decisiones basadas en el tipo de mensaje que llega,
+//! dirigiéndolo al servicio apropiado (FSM, Firmware, Network, etc.).
+
 use crate::second_layer::{
     database::domain::{DataHandle, TableDataVector},
     message::{
@@ -14,17 +20,31 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
+/// Servicio orquestador central de la segunda capa.
+///
+/// Evalúa el origen y tipo de cada evento o mensaje, y lo redirige
+/// utilizando el manejador (Handle) del servicio destino.
 pub struct SecondLayerMiddleware {
+    /// Canal para recibir mensajes procesados desde `MessageService`.
     middleware_from_message_service: mpsc::Receiver<MessageServiceResponse>,
+    /// Canal para recibir lotes de datos desde el servicio de base de datos.
     middleware_from_data_service: mpsc::Receiver<TableDataVector>,
+    /// Manejador para enviar comandos hacia `MessageService`.
     middleware_to_message_service: MessageHandle,
+    /// Manejador para enviar eventos hacia la máquina de estados (FSM).
     middleware_to_fsm_service: FsmHandle,
+    /// Manejador para enviar eventos al gestor de red.
     middleware_to_network_service: NetworkHandle,
+    /// Manejador para interactuar con el servicio de actualizaciones de firmware.
     middleware_to_firmware_service: FirmwareHandle,
+    /// Manejador para enviar eventos a la FSM de telemetría (Heartbeat).
     middleware_to_heartbeat_service: HeartbeatHandle,
+    /// Manejador para enviar comandos a la base de datos.
     middleware_to_data_service: DataHandle,
 }
 
+/// Constructor con el patrón Builder para inicializar de forma segura
+/// el `SecondLayerMiddleware`.
 #[derive(Default)]
 pub struct SecondLayerMiddlewareBuilder {
     middleware_from_message_service: Option<mpsc::Receiver<MessageServiceResponse>>,
@@ -32,6 +52,7 @@ pub struct SecondLayerMiddlewareBuilder {
 }
 
 impl SecondLayerMiddlewareBuilder {
+    /// Inyecta el canal de recepción desde `MessageService`.
     pub fn middleware_from_message_service(
         mut self,
         ch: mpsc::Receiver<MessageServiceResponse>,
@@ -40,11 +61,16 @@ impl SecondLayerMiddlewareBuilder {
         self
     }
 
+    /// Inyecta el canal de recepción desde la base de datos.
     pub fn middleware_from_data_service(mut self, ch: mpsc::Receiver<TableDataVector>) -> Self {
         self.middleware_from_data_service = Some(ch);
         self
     }
 
+    /// Construye y valida la instancia de `SecondLayerMiddleware`.
+    ///
+    /// Asegura que todos los canales receptores fueron provistos.
+    /// Consume el builder y los `Handle`s de la tercera capa y servicios vecinos.
     pub fn build(
         self,
         message: MessageHandle,
@@ -72,10 +98,17 @@ impl SecondLayerMiddlewareBuilder {
 }
 
 impl SecondLayerMiddleware {
+    /// Crea un nuevo constructor (`Builder`) para ensamblar el servicio.
     pub fn builder() -> SecondLayerMiddlewareBuilder {
         SecondLayerMiddlewareBuilder::default()
     }
 
+    /// Lanza el bucle de eventos infinito del middleware.
+    ///
+    /// Utiliza `tokio::select!` para atender simultáneamente:
+    /// - Señales de apagado del sistema.
+    /// - Mensajes entrantes del servidor o de la red local (vía `MessageService`).
+    /// - Lotes de datos para ser exportados al exterior (vía base de datos).
     pub async fn run(mut self, shutdown: CancellationToken) {
         loop {
             tokio::select! {

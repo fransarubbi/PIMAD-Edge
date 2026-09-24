@@ -25,8 +25,11 @@ enum State {
     Working,
 }
 
+/// Enum que encapsula los comandos que recibe la tarea `hub_ota`.
 pub enum CommandToHubOta {
+    /// Inicia el proceso de actualización solicitada por el servidor para una red dada.
     Request(UpdateHubFirmware),
+    /// Evento asíncrono con el resultado de actualización de un Hub.
     Response(FirmwareHubAck),
 }
 
@@ -36,6 +39,15 @@ struct HubFirmwareStatus {
     pub success: bool,
 }
 
+/// Tarea asíncrona dedicada a actualizar el firmware del propio dispositivo Edge (Auto-actualización).
+///
+/// # Funcionamiento
+/// 1. Entra en estado `Sleeping` y espera el comando `UpdateEdgeFirmware`.
+/// 2. Cuando llega el comando, verifica vía `self_update` si existe una *release* más reciente
+///    en el repositorio de GitHub (de acuerdo al token y nombre de usuario).
+/// 3. De ser así, descarga y reemplaza el binario en ejecución (`pimad_edge`).
+/// 4. Notifica el resultado al servidor central (vía `MessageHandle`).
+/// 5. Si fue exitoso, envía una señal de apagado general para reiniciar y ejecutar la nueva versión.
 #[instrument(name = "edge_ota", skip_all)]
 pub async fn edge_ota(
     mut rx: mpsc::Receiver<UpdateEdgeFirmware>,
@@ -117,6 +129,16 @@ pub async fn edge_ota(
     }
 }
 
+/// Tarea asíncrona dedicada a orquestar la actualización de firmware de una flota de Hubs.
+///
+/// Implementa una Máquina de Estados que:
+/// 1. Espera la solicitud de actualizar una red (`Request`).
+/// 2. Inicia un temporizador de seguridad (`firmware_watchdog_timer`).
+/// 3. Obtiene la versión requerida y los Hubs pertenecientes a esa red.
+/// 4. Despacha comandos de actualización (`UpdateFirmwareRequestHub`) mediante MQTT hacia los Hubs.
+/// 5. Recolecta iterativamente los acuses de recibo (`FirmwareHubAck`) hasta que todos responden
+///    o expira el temporizador (Timeout).
+/// 6. Calcula el porcentaje de éxito y se lo envía de vuelta al servidor central.
 #[instrument(name = "hub_ota", skip_all)]
 pub async fn hub_ota(
     tx_to_timer: mpsc::Sender<Event>,

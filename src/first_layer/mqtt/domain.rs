@@ -18,23 +18,40 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
+/// Manejador (`Handle`) ligero para comunicarse con el `MqttService`.
+///
+/// Permite inyectar comandos e interactuar asíncronamente con el bucle
+/// del cliente MQTT en ejecución, sin necesidad de acceder a los canales 
+/// de forma directa.
 #[derive(Clone)]
 pub struct MqttHandle {
+    /// Canal de envío hacia el orquestador MQTT.
     tx: mpsc::Sender<InternalMqttCommand>,
 }
 
 impl MqttHandle {
+    /// Envía un mensaje serializado al servicio MQTT para que sea publicado.
+    ///
+    /// # Argumentos
+    /// * `data` - El mensaje listo con su tópico y payload (`SerializedMessage`).
     pub async fn send_serialized(&self, data: SerializedMessage) {
         let _ = self.tx.send(InternalMqttCommand::Serialized(data)).await;
     }
+    
+    /// Notifica al servicio MQTT que la red inicial está lista y cargada en memoria.
     pub async fn networks_ready(&self) {
         let _ = self.tx.send(InternalMqttCommand::NetworksReady).await;
     }
+    
+    /// Notifica al servicio MQTT que hubo un cambio en la configuración de la red 
+    /// (e.g. nuevos dispositivos) y debe actualizar sus suscripciones.
     pub async fn update_networks(&self) {
         let _ = self.tx.send(InternalMqttCommand::NetworksUpdated).await;
     }
 }
 
+/// Enumeración interna que representa los comandos que recibe el `MqttService`
+/// desde el manejador `MqttHandle`.
 enum InternalMqttCommand {
     /// Un mensaje de datos ya procesado y serializado, listo para ser publicado.
     Serialized(SerializedMessage),
@@ -48,7 +65,9 @@ enum InternalMqttCommand {
 /// Igual que InternalMqttCommand pero para uso del modulo. Se busca simplicidad en el diseño de logic.rs.
 /// El exterior debe usar MqttHandle.
 pub enum MqttServiceCommand {
+    /// Indica que las redes se han cargado por primera vez en memoria.
     NetworksReady,
+    /// Indica que hubo una actualización en las redes y se deben recalcular las suscripciones.
     NetworksUpdated,
 }
 

@@ -1,7 +1,7 @@
 //! Módulo de comunicación gRPC con el servidor central.
 //!
 //! Este módulo establece y mantiene una conexión **gRPC bidireccional segura (mTLS)**
-//! entre el gateway/dispositivo Edge y el servidor. Implementa un cliente
+//! entre el dispositivo Edge y el servidor. Implementa un cliente
 //! resiliente capaz de recuperarse de caídas de red mediante reconexión automática.
 //!
 //!
@@ -38,12 +38,25 @@ use tonic::{
 };
 use tracing::{error, info, instrument, warn};
 
+/// Manejador (`Handle`) ligero para comunicarse con el `GrpcService`.
+///
+/// Este struct proporciona una interfaz simple para enviar mensajes (`FromEdge`)
+/// a través de la conexión gRPC hacia el servidor central, abstrayendo
+/// el uso directo de los canales subyacentes.
 #[derive(Clone)]
 pub struct GrpcHandle {
+    /// Canal interno por donde se despachan los mensajes hacia el bucle gRPC.
     tx: mpsc::Sender<FromEdge>,
 }
 
 impl GrpcHandle {
+    /// Envía un mensaje asincrónicamente hacia el servidor gRPC.
+    ///
+    /// Internamente transmite el objeto `FromEdge` (generado a partir de protobuf)
+    /// hacia la tarea del cliente gRPC.
+    ///
+    /// # Argumentos
+    /// * `data` - Mensaje a ser transmitido hacia la nube.
     pub async fn send_serialized(&self, data: FromEdge) {
         let _ = self.tx.send(data).await;
     }

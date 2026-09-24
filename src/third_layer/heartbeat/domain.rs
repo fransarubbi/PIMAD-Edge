@@ -19,6 +19,7 @@
 
 use crate::second_layer::database::domain::DataHandle;
 use crate::second_layer::message::domain::Heartbeat;
+use crate::second_layer::message::logic::MessageHandle;
 use crate::system::domain::InternalEvent;
 use crate::third_layer::heartbeat::logic::{heartbeat, run_fsm_heartbeat};
 use tokio::sync::mpsc;
@@ -26,6 +27,10 @@ use tokio::time::{Duration, sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument};
 
+/// Manejador ligero para interactuar con el servicio de latidos.
+///
+/// Sirve como puente de comunicación (vía MPSC) para notificar acuses de recibo
+/// (`ack_heartbeat_server`) y coordinar con el orquestador principal de Heartbeat.
 #[derive(Clone)]
 pub struct HeartbeatHandle {
     tx: mpsc::Sender<Heartbeat>,
@@ -36,23 +41,30 @@ impl HeartbeatHandle {
         let _ = self.tx.send(data).await;
     }
 }
-
+/// Actor/Servicio asíncrono principal que gestiona el monitoreo de conectividad.
+///
+/// Lanza sub-tareas que disparan temporizadores regulares y ejecutan una pequeña FSM interna 
+/// (`FsmHeartbeat`) para llevar cuenta de los latidos faltantes y notificar al sistema 
+/// (vía `ChannelsThirdLayerMiddleware`) cuando hay un corte o un re-establecimiento de conexión.
 pub struct HeartbeatService {
     sender: mpsc::Sender<InternalEvent>,
     rx: mpsc::Receiver<Heartbeat>,
     db_handle: DataHandle,
+    msg_handle: MessageHandle,
 }
 
 impl HeartbeatService {
     pub fn new(
         sender: mpsc::Sender<InternalEvent>,
         db_handle: DataHandle,
+        msg_handle: MessageHandle,
     ) -> (Self, HeartbeatHandle) {
         let (tx, rx) = mpsc::channel(10);
         let service = Self {
             sender,
             rx,
             db_handle,
+            msg_handle,
         };
         let handle = HeartbeatHandle { tx };
         (service, handle)
@@ -73,6 +85,7 @@ impl HeartbeatService {
             rx_from_server,
             rx_fsm,
             self.db_handle.clone(),
+            self.msg_handle.clone(),
             shutdown.clone(),
         ));
 

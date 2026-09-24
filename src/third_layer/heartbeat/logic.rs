@@ -13,6 +13,7 @@
 use crate::config::heartbeat::*;
 use crate::second_layer::database::domain::DataHandle;
 use crate::second_layer::message::domain::Heartbeat;
+use crate::second_layer::message::logic::MessageHandle;
 use crate::system::domain::InternalEvent;
 use crate::third_layer::heartbeat::domain::{
     Action, Event, FsmHeartbeat, State, Status, Transition,
@@ -34,6 +35,7 @@ use tracing::{error, info, instrument, warn};
 /// * `tx_to_timer`: Canal para controlar el temporizador de seguridad (Watchdog).
 /// * `rx_from_server`: Canal por donde llegan los mensajes decodificados gRPC.
 /// * `rx_fsm`: Canal por donde la FSM envía las instrucciones (Acciones) que deben ejecutarse.
+
 #[instrument(name = "heartbeat", skip_all)]
 pub async fn heartbeat(
     tx: mpsc::Sender<InternalEvent>,
@@ -42,6 +44,7 @@ pub async fn heartbeat(
     mut rx_from_server: mpsc::Receiver<Heartbeat>,
     mut rx_fsm: mpsc::Receiver<Vec<Action>>,
     db_handle: DataHandle,
+    msg_handle: MessageHandle,
     shutdown: CancellationToken,
 ) {
     loop {
@@ -80,6 +83,7 @@ pub async fn heartbeat(
                                     if !result {
                                         error!("no se pudo distribuir el estado de ServerConnected a DataHandle desde Heartbeat");
                                     }
+                                    msg_handle.is_server_live(true).await;
                                 }
                                 if new_status == Status::Disconnected {
                                     if tx.send(InternalEvent::ServerDisconnected).await.is_err() {
@@ -89,6 +93,7 @@ pub async fn heartbeat(
                                     if !result {
                                         error!("no se pudo distribuir el estado de ServerDisconnected a DataHandle desde Heartbeat");
                                     }
+                                    msg_handle.is_server_live(false).await;
                                 }
                             }
                         }
@@ -114,6 +119,7 @@ pub async fn heartbeat(
 ///
 /// * `tx_actions`: Canal para enviar las acciones resultantes (Side Effects) al orquestador.
 /// * `rx_from_server`: Canal de entrada de eventos (Heartbeats recibidos, Timeouts del timer).
+
 #[instrument(name = "run_fsm_heartbeat", skip_all)]
 pub async fn run_fsm_heartbeat(
     tx_actions: mpsc::Sender<Vec<Action>>,

@@ -164,6 +164,7 @@ impl Topic {
 ///
 /// Pre-calcula y almacena estáticamente todos los paths MQTT vinculados a su ID.
 /// Esto evita tener que construir strings `format!()` repetitivamente durante la ejecución.
+/// Representa la abstracción en memoria de una Subred IoT, gestionando
 #[derive(Debug, Clone)]
 pub struct Network {
     pub id_network: String,

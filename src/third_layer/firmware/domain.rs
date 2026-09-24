@@ -10,39 +10,59 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument};
 
+/// Comandos internos que recibe el orquestador `FirmwareService`.
 enum InternalFirmwareCommand {
+    /// Solicitud desde el servidor para actualizar los Hubs de una red específica.
     UpdateHub { data: UpdateHubFirmware },
+    /// Acuse de recibo o respuesta de un Hub tras haber intentado actualizar su firmware.
     AckFromHub { data: FirmwareHubAck },
+    /// Solicitud desde el servidor para actualizar el firmware del propio Edge.
     UpdateEdge { data: UpdateEdgeFirmware },
 }
 
+/// Manejador (`Handle`) ligero para comunicarse con el `FirmwareService`.
+///
+/// Permite enviar comandos asíncronos para iniciar procesos de actualización OTA
+/// (Over-The-Air) tanto del propio Edge como de los Hubs.
 #[derive(Clone)]
 pub struct FirmwareHandle {
     tx: mpsc::Sender<InternalFirmwareCommand>,
 }
 
 impl FirmwareHandle {
+    /// Inicia el proceso de actualización para una red completa de Hubs.
     pub async fn update_hubs(&self, data: UpdateHubFirmware) {
         let cmd = InternalFirmwareCommand::UpdateHub { data };
         let _ = self.tx.send(cmd).await;
     }
+    /// Enruta la confirmación/resultado de actualización proveniente de un Hub.
     pub async fn ack_from_hub(&self, data: FirmwareHubAck) {
         let cmd = InternalFirmwareCommand::AckFromHub { data };
         let _ = self.tx.send(cmd).await;
     }
+    /// Inicia el proceso de actualización del firmware del propio dispositivo Edge.
     pub async fn update_edge(&self, data: UpdateEdgeFirmware) {
         let cmd = InternalFirmwareCommand::UpdateEdge { data };
         let _ = self.tx.send(cmd).await;
     }
 }
 
+/// Orquestador central para la gestión de actualizaciones de firmware OTA.
+///
+/// Lanza y supervisa tareas concurrentes (tasks) separadas para gestionar
+/// tanto las actualizaciones de los Hubs, como las del propio Edge, además
+/// de manejar temporizadores (watchdogs) de seguridad.
 pub struct FirmwareService {
+    /// Canal receptor de los comandos provenientes de otras partes del sistema.
     rx: mpsc::Receiver<InternalFirmwareCommand>,
+    /// Contexto global de la aplicación.
     context: AppContext,
+    /// Handle para enviar respuestas o mensajes al servidor o a los Hubs vía MQTT/gRPC.
     message_handle: MessageHandle,
 }
 
 impl FirmwareService {
+    /// Crea y enlaza el servicio con su manejador.
     pub fn new(context: AppContext, message_handle: MessageHandle) -> (Self, FirmwareHandle) {
         let (tx, rx) = mpsc::channel(10);
         let service = Self {
@@ -54,6 +74,12 @@ impl FirmwareService {
         (service, handle)
     }
 
+    /// Lanza el bucle de eventos asíncrono y los sub-procesos concurrentes.
+    ///
+    /// Se encarga de instanciar las tareas hijas:
+    /// - `hub_ota`: Gestiona el rollout de un firmware a varios Hubs.
+    /// - `edge_ota`: Gestiona la auto-actualización.
+    /// - `firmware_watchdog_timer`: Temporizador de seguridad para abortar procesos bloqueados.
     pub async fn run(mut self, shutdown: CancellationToken) {
         let token = CancellationToken::new();
 
@@ -118,11 +144,15 @@ impl FirmwareService {
     }
 }
 
+/// Eventos para controlar el temporizador asíncrono (Watchdog) del proceso OTA.
 pub enum Event {
     /// Comando interno para iniciar el timer.
+    /// Comando interno para iniciar el temporizador con la duración dada.
     InitTimer(Duration),
     /// Comando interno para detener el timer.
+    /// Comando interno para detener o cancelar el temporizador activo.
     StopTimer,
+    /// Señal emitida por el temporizador indicando que el tiempo ha expirado.
     Timeout,
 }
 
@@ -130,6 +160,8 @@ pub enum Event {
 ///
 /// Implementa un patrón "Dead Man's Switch". Espera un comando `InitTimer`.
 /// Si el tiempo expira antes de recibir `StopTimer`, envía un evento `Timeout` a la FSM.
+/// Si el tiempo expira antes de recibir `StopTimer`, envía un evento `Timeout` a la FSM
+/// o tarea controladora para abortar la operación que tardó demasiado.
 #[instrument(name = "firmware_watchdog_timer", skip(cmd_rx))]
 async fn firmware_watchdog_timer(
     tx_to_fsm: mpsc::Sender<Event>,

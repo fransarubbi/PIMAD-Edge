@@ -22,6 +22,10 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
+/// Manejador ligero para interactuar con el recolector de métricas.
+///
+/// Permite inyectar eventos de conexión/desconexión desde la FSM o el Heartbeat,
+/// los cuales controlarán si el servicio despacha las métricas al servidor.
 #[derive(Clone)]
 pub struct MetricsHandle {
     tx: mpsc::Sender<InternalMetricsCommand>,
@@ -37,7 +41,11 @@ impl MetricsHandle {
 enum InternalMetricsCommand {
     Connection { data: InternalEvent },
 }
-
+/// Actor/Servicio asíncrono que orquesta la recolección periódica de datos del sistema.
+///
+/// Recolecta el estado del sistema operativo (uso de recursos) mediante `MetricsCollector`
+/// y, si hay conexión activa con el servidor central, enruta las métricas hacia la nube a través 
+/// de un `MessageHandle`.
 pub struct MetricsService {
     rx: mpsc::Receiver<InternalMetricsCommand>,
     handler: MessageHandle,

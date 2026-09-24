@@ -16,26 +16,39 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
+/// Resultado de una operación relacionada con la red en la base de datos.
 pub struct NetworkResult {
+    /// Indica si la operación fue exitosa.
     pub result: bool,
+    /// Indica si, tras la operación, el número total de redes registradas es cero.
     pub zero_networks: bool,
 }
 
+/// Agrupa los resultados de consultar la topología completa (redes y dispositivos Hub).
 pub struct AllNetworksResult {
+    /// Lista de todas las redes registradas en base de datos.
     pub networks: Option<Vec<NetworkRow>>,
+    /// Lista de todos los dispositivos (Hubs) registrados en base de datos.
     pub hubs: Option<Vec<HubRow>>,
 }
 
+/// Representa una fila en la tabla de Redes (`networks`).
 #[derive(Debug, FromRow, Deserialize, PartialEq, Clone)]
 pub struct NetworkRow {
+    /// Identificador único de la red.
     pub id_network: String,
+    /// Estado de la red (activa o inactiva).
     pub active: bool,
 }
 
+/// Representa una fila en la tabla de Dispositivos (`hubs`).
 #[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq, Eq, FromRow, Hash)]
 pub struct HubRow {
+    /// Identificador único del Hub.
     pub id: String,
+    /// Nombre legible del dispositivo.
     pub device_name: String,
+    /// Referencia al identificador de la red a la que pertenece este Hub.
     pub network_id: String,
 }
 
@@ -82,6 +95,10 @@ enum InternalDataCommand {
     },
 }
 
+/// Manejador (`Handle`) ligero para interactuar con el `DataService`.
+///
+/// Permite encolar peticiones asíncronas de lectura/escritura (inserciones, borrados, consultas)
+/// que serán ejecutadas secuencialmente por el actor de la base de datos.
 #[derive(Clone)]
 pub struct DataHandle {
     tx: mpsc::Sender<InternalDataCommand>,
@@ -251,9 +268,17 @@ impl DataHandle {
     }
 }
 
+/// Servicio principal asíncrono para gestionar el acceso a la base de datos.
+///
+/// Implementa un patrón Actor. Centraliza todas las consultas y escrituras a SQLite, 
+/// garantizando consistencia y previniendo bloqueos, al mismo tiempo que despacha periódicamente 
+/// lotes (`TableDataVector`) de datos acumulados hacia otras capas.
 pub struct DataService {
-    tx_batch: mpsc::Sender<TableDataVector>, // canal para enviar batches extraídos
+    /// Canal por donde el servicio expulsa lotes (batches) de datos.
+    tx_batch: mpsc::Sender<TableDataVector>,
+    /// Canal de recepción de comandos (inserciones, eliminaciones, consultas).
     rx: mpsc::Receiver<InternalDataCommand>,
+    /// Repositorio subyacente que ejecuta las consultas SQL (`sqlx`).
     repo: Repository,
 }
 
@@ -414,10 +439,19 @@ impl DataService {
 /// Estructura que agrupa un lote de datos de un tipo específico junto con su metadato de origen.
 /// Se utiliza para mover batches desde la DB hacia el sistema de mensajería.
 #[derive(Clone, Debug, Default, Serialize)]
+/// Vector multiplexado de datos extraídos de la base de datos.
+///
+/// Encapsula múltiples tipos de mensajes (`Measurement`, `AlertAir`, `AlertTh`, `Monitor`)
+/// en un único paquete que será enviado periódicamente a la capa de mensajería para
+/// ser publicado en la nube.
 pub struct TableDataVector {
+    /// Lote de mediciones de sensores (datos ambientales).
     pub measurement: Vec<Measurement>,
+    /// Lote de alertas de calidad del aire.
     pub alert_air: Vec<AlertAir>,
+    /// Lote de alertas de temperatura/humedad.
     pub alert_th: Vec<AlertTh>,
+    /// Lote de estados del dispositivo (Monitor).
     pub monitor: Vec<Monitor>,
 }
 

@@ -166,6 +166,7 @@ pub enum Event {
     LocalConnected,
 }
 
+/// Indica el estado persistente y compartido (memoria de trabajo) de la sesión de balanceo.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StateOfSession {
     None,
@@ -179,6 +180,11 @@ pub enum StateOfSession {
     SafeMode,
 }
 
+/// Mantiene la memoria y contadores durante el proceso iterativo de balanceo (handshakes y quórum).
+///
+/// Dado que la FSM de Rust es funcional y pura (sin estado mutable interno más allá de su `FsmState`),
+/// `UpdateSession` se utiliza como un objeto de memoria anexo (`Context`) que se pasa
+/// por las acciones para ir acumulando confirmaciones y reintentos.
 pub struct UpdateSession {
     empty_hash: HashMap<String, bool>,
     handshake_hash: HashMap<String, u32>,

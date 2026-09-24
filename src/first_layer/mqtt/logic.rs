@@ -43,8 +43,11 @@ enum StateClient {
     Init,
     /// Estado operativo normal. Contiene las instancias activas del cliente y el estado de los tópicos.
     Work {
+        /// Cliente MQTT asíncrono para enviar mensajes e interactuar con el broker.
         client: AsyncClient,
+        /// Bucle de eventos para recibir mensajes entrantes y mantener la conexión.
         event_loop: EventLoop,
+        /// Registro actual de suscripciones para administrar altas y bajas dinámicas.
         current_subs: HashMap<String, SubEntry>,
     },
     /// Estado de fallo. El sistema esperará antes de intentar transicionar de nuevo a `Init`.

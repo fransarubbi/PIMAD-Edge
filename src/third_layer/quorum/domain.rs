@@ -1,17 +1,29 @@
 use serde::Deserialize;
 
 
-/// Post-Failure Control and Balancing Protocol
+/// Configuraciones del PCBP (Post-Failure Control and Balancing Protocol).
+///
+/// Modela los umbrales de tiempo, frecuencias y reintentos permitidos durante el algoritmo 
+/// de balanceo y de funcionamiento normal/seguro.
 #[derive(Default, Debug, Deserialize)]
 pub struct ProtocolSettings {
+    /// Número máximo de reintentos (ej: reintentos de handshake).
     max_attempts: u64,
+    /// Frecuencia base usada en la fase de alerta/monitoreo/datos.
     frequency_phase: u32,
+    /// Frecuencia para reportar latidos durante el modo seguro.
     frequency_safe_mode: u32,
+    /// Tiempo límite esperando un Handshake de los Hubs.
     timeout_handshake: u64,
+    /// Tiempo límite (timeout) general de una fase (ej. PhaseAlert).
     timeout_phase: u64,
+    /// Tiempo límite para mantener el estado de Safe Mode.
     timeout_safe_mode: u64,
+    /// Retardo entre latidos durante el modo de balanceo.
     time_between_heartbeats_balance_mode: u64,
+    /// Retardo entre latidos durante el modo normal.
     time_between_heartbeats_normal: u64,
+    /// Retardo entre latidos durante el modo seguro.
     time_between_heartbeats_safe_mode: u64,
 }
 

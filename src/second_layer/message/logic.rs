@@ -21,12 +21,16 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
+/// Representa las distintas alertas generadas por los dispositivos.
 #[derive(Serialize)]
 pub enum Alert {
+    /// Alerta de calidad de aire.
     AlertAir(AlertAir),
+    /// Alerta de temperatura.
     AlertTemperature(AlertTh),
 }
 
+/// Comandos internos recibidos por `MessageService` para serializar y enrutar mensajes.
 #[derive(Serialize)]
 enum InternalMessageCommand {
     // Mensajes para los Hub
@@ -53,114 +57,163 @@ enum InternalMessageCommand {
     SerializeNetworkAck { data: NetworkAck },
     SerializeHubState { data: HubState },
     SerializeEdgeFirmwareResult { data: FirmwareEdgeResult },
+
+    // Estado del servidor
+    IsServerLive { data: bool },
 }
 
+/// Manejador (`Handle`) ligero para comunicarse con el `MessageService`.
+///
+/// Abstrae la inyección de peticiones asíncronas de serialización
+/// de mensajes y enrutamiento hacia la nube o red local.
 #[derive(Clone)]
 pub struct MessageHandle {
+    /// Canal de comunicación hacia el orquestador `MessageService`.
     tx: mpsc::Sender<InternalMessageCommand>,
 }
 
 impl MessageHandle {
+    /// Serializa y envía una solicitud de actualización de firmware hacia un Hub.
     pub async fn serialize_update_hub_firmware(&self, data: UpdateFirmwareRequestHub) {
         let cmd = InternalMessageCommand::SerializeUpdateHubFirmware { data };
         let _ = self.tx.send(cmd).await;
     }
+    /// Serializa y envía una nueva configuración (Settings) hacia un Hub.
     pub async fn serialize_new_config_hub(&self, data: Settings) {
         let cmd = InternalMessageCommand::SerializeNewConfigHub { data };
         let _ = self.tx.send(cmd).await;
     }
+    /// Serializa y envía un acuse de recibo de configuración (SettingsAck) hacia un Hub.
     pub async fn serialize_ack_config_hub(&self, data: SettingsAck) {
         let cmd = InternalMessageCommand::SerializeAckConfigHub { data };
         let _ = self.tx.send(cmd).await;
     }
+    /// Serializa y envía un latido (Heartbeat) hacia la red local (Hubs).
     pub async fn serialize_heartbeat_hub(&self, data: Heartbeat) {
         let cmd = InternalMessageCommand::SerializeHeartbeatHub { data };
         let _ = self.tx.send(cmd).await;
     }
+    /// Serializa y envía una trama de Handshake hacia los Hubs.
     pub async fn serialize_handshake_hub(&self, data: HandshakeToHub) {
         let cmd = InternalMessageCommand::SerializeHandshakeHub { data };
         let _ = self.tx.send(cmd).await;
     }
+    /// Serializa y envía notificaciones de cambio de fase hacia los Hubs.
     pub async fn serialize_phase_hub(&self, data: PhaseNotification) {
         let cmd = InternalMessageCommand::SerializePhaseHub { data };
         let _ = self.tx.send(cmd).await;
     }
+    /// Serializa y envía estados de la capa lógica hacia un Hub.
     pub async fn serialize_state_hub(&self, data: StateToHub) {
         let cmd = InternalMessageCommand::SerializeStateHub { data };
         let _ = self.tx.send(cmd).await;
     }
+    /// Serializa y envía la respuesta a una petición de vinculación (Linkage).
     pub async fn serialize_linkage_hub(&self, data: LinkageAck) {
         let cmd = InternalMessageCommand::SerializeLinkageHub { data };
         let _ = self.tx.send(cmd).await;
     }
+    /// Serializa y envía al servidor los resultados de la actualización de una red.
     pub async fn serialize_hub_firmware_result(&self, data: FirmwareHubResult) {
         let cmd = InternalMessageCommand::SerializeHubFirmwareResult { data };
         let _ = self.tx.send(cmd).await;
     }
+    /// Envía un mensaje inicial (Hello) al servidor.
     pub async fn serialize_hello_server(&self, data: HelloServer) {
         let cmd = InternalMessageCommand::SerializeHelloServer { data };
         let _ = self.tx.send(cmd).await;
     }
+    /// Serializa y envía la configuración de un Hub hacia el servidor.
     pub async fn serialize_hub_settings_server(&self, data: Settings) {
         let cmd = InternalMessageCommand::SerializeHubSettingsServer { data };
         let _ = self.tx.send(cmd).await;
     }
+    /// Serializa y envía el acuse de recibo de configuración al servidor.
     pub async fn serialize_hub_settings_ack_server(&self, data: SettingsAck) {
         let cmd = InternalMessageCommand::SerializeHubSettingsAckServer { data };
         let _ = self.tx.send(cmd).await;
     }
+    /// Serializa y envía datos telemétricos (mediciones) hacia el servidor.
     pub async fn serialize_telemetry(&self, data: Measurement) {
         let cmd = InternalMessageCommand::SerializeTelemetry { data };
         let _ = self.tx.send(cmd).await;
     }
+    /// Serializa y envía un informe de salud del Hub hacia el servidor.
     pub async fn serialize_hub_monitor(&self, data: Monitor) {
         let cmd = InternalMessageCommand::SerializeHubMonitor { data };
         let _ = self.tx.send(cmd).await;
     }
+    /// Serializa y envía alertas hacia el servidor.
     pub async fn serialize_alert(&self, data: Alert) {
         let cmd = InternalMessageCommand::SerializeAlert { data };
         let _ = self.tx.send(cmd).await;
     }
+    /// Serializa y envía las métricas internas de salud del Edge hacia el servidor.
     pub async fn serialize_edge_monitor(&self, data: SystemMetrics) {
         let cmd = InternalMessageCommand::SerializeEdgeMonitor { data };
         let _ = self.tx.send(cmd).await;
     }
+    /// Serializa y envía un lote de mensajes persistidos desde la base de datos hacia el servidor.
     pub async fn serialize_batch(&self, data: TableDataVector) {
         let cmd = InternalMessageCommand::SerializeBatch { data };
         let _ = self.tx.send(cmd).await;
     }
+    /// Serializa y envía un estado de capa lógica del Edge hacia el servidor.
     pub async fn serialize_edge_state(&self, data: EdgeState) {
         let cmd = InternalMessageCommand::SerializeEdgeState { data };
         let _ = self.tx.send(cmd).await;
     }
+    /// Serializa y envía una confirmación sobre cambios de topología al servidor.
     pub async fn serialize_network_ack(&self, data: NetworkAck) {
         let cmd = InternalMessageCommand::SerializeNetworkAck { data };
         let _ = self.tx.send(cmd).await;
     }
+    /// Serializa y envía un estado de Hub hacia el servidor.
     pub async fn serialize_hub_state(&self, data: HubState) {
         let cmd = InternalMessageCommand::SerializeHubState { data };
         let _ = self.tx.send(cmd).await;
     }
+    /// Serializa y envía el resultado de la actualización de firmware del propio Edge.
     pub async fn serialize_edge_firmware_result(&self, data: FirmwareEdgeResult) {
         let cmd = InternalMessageCommand::SerializeEdgeFirmwareResult { data };
         let _ = self.tx.send(cmd).await;
     }
+    /// Notifica si el servidor central se encuentra vivo o ha muerto.
+    pub async fn is_server_live(&self, data: bool) {
+        let cmd = InternalMessageCommand::IsServerLive { data };
+        let _ = self.tx.send(cmd).await;
+    }
 }
 
+/// Representa las respuestas y mensajes decodificados que genera el `MessageService` 
+/// para ser entregados al middleware de la capa 2.
 pub enum MessageServiceResponse {
+    /// Un mensaje originado en la red local (Hub).
     FromHub(HubMessage),
+    /// Un mensaje originado en el servidor central.
     FromServer(ServerMessage),
+    /// El servicio de red local reportó una desconexión.
     LocalDisconnected,
+    /// El servicio de red local reportó una conexión.
     LocalConnected,
 }
 
+/// Orquestador central encargado del procesamiento (serialización y deserialización)
+/// y enrutamiento entre los adaptadores de comunicaciones (gRPC, MQTT) y la lógica de Edge.
 pub struct MessageService {
+    /// Canal para enviar respuestas deserializadas hacia el middleware.
     sender: mpsc::Sender<MessageServiceResponse>,
+    /// Canal de escucha donde llegan los eventos en bruto desde MQTT y gRPC.
     receiver: mpsc::Receiver<InternalEvent>,
+    /// Canal de recepción para órdenes de serialización/transmisión de datos producidos localmente.
     rx: mpsc::Receiver<InternalMessageCommand>,
+    /// Manejador de la conexión con el servidor.
     grpc_handle: GrpcHandle,
+    /// Manejador de la conexión MQTT local.
     mqtt_handle: MqttHandle,
+    /// Contexto y configuración del sistema.
     context: AppContext,
+    /// Handle interno para auto-referenciarse (usado a veces para delegaciones locales).
     msg_handle: MessageHandle,
 }
 
@@ -327,6 +380,13 @@ impl MessageService {
                                     Ok(_) => {}
                                     Err(_) => error!("no se pudo serializar el mensaje LinkageHub"),
                                 }
+                            }
+                        }
+                        InternalMessageCommand::IsServerLive { data } => {
+                            if data {
+                                server_status = InternalEvent::ServerConnected;
+                            } else {
+                                server_status = InternalEvent::ServerDisconnected;
                             }
                         }
                         _ => {

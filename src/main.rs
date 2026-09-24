@@ -90,6 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (heartbeat_service, heart_handle) = HeartbeatService::new(
         channels_third_middleware.heartbeat_service_to_middleware,
         data_handle.clone(),
+        msg_handle.clone(),
     );
     let (metrics_service, metrics_handle) =
         MetricsService::new(msg_handle.clone(), app_context.clone());
@@ -166,7 +167,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    info!("Info: shutdown completo");
+    info!("shutdown completo");
 
     Ok(())
 }

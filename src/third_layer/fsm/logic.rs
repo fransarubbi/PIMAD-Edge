@@ -21,6 +21,10 @@ use tokio::time::{Duration, interval, sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument};
 
+/// Manejador (`Handle`) ligero para comunicarse con el actor de la `FSM`.
+///
+/// Permite encolar notificaciones (como handshakes de Hubs, avisos de colas vacías o
+/// cambios de conectividad) hacia la Máquina de Estados Finita.
 #[derive(Clone)]
 pub struct FsmHandle {
     tx: mpsc::Sender<InternalFsmCommand>,
@@ -73,6 +77,10 @@ enum EventFsm {
     Connection(InternalEvent),
 }
 
+/// Orquestador y enrutador principal de la Máquina de Estados.
+///
+/// Gestiona la recepción de eventos concurrentes, el mantenimiento del `UpdateSession`
+/// y despacha los eventos a la función de transición pura `next_state`.
 pub struct FsmService {
     rx: mpsc::Receiver<InternalFsmCommand>,
     context: AppContext,

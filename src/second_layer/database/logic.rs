@@ -2,6 +2,11 @@ use super::domain::{AllNetworksResult, HubRow, NetworkResult, NetworkRow, TableD
 use crate::second_layer::{database::repository::Repository, message::domain::HubMessage};
 use tracing::{error, info};
 
+/// Actualiza el estado (activo/inactivo) de una red en la base de datos.
+///
+/// # Argumentos
+/// * `repo` - Referencia al repositorio subyacente.
+/// * `network` - Datos a actualizar de la red (`NetworkRow`).
 pub async fn update_network(repo: &Repository, network: NetworkRow) -> bool {
     let mut result = false;
     match repo.update_network(network.clone()).await {
@@ -36,6 +41,14 @@ pub async fn update_network(repo: &Repository, network: NetworkRow) -> bool {
     }
 }
 
+/// Registra un nuevo dispositivo Hub en la base de datos.
+///
+/// Primero verifica si existen redes en el sistema, ya que un Hub debe
+/// asociarse forzosamente a una red existente.
+///
+/// # Argumentos
+/// * `repo` - Referencia al repositorio subyacente.
+/// * `hub` - Estructura que contiene los datos del Hub a insertar.
 pub async fn save_hub(repo: &Repository, hub: HubRow) -> bool {
     let mut result = false;
     match repo.get_number_of_networks().await {
@@ -62,6 +75,11 @@ pub async fn save_hub(repo: &Repository, hub: HubRow) -> bool {
     return result;
 }
 
+/// Elimina una red y, en cascada, todos los Hubs asociados a ella.
+///
+/// # Argumentos
+/// * `repo` - Referencia al repositorio subyacente.
+/// * `id` - Identificador de la red a eliminar.
 pub async fn delete_network(repo: &Repository, id: String) -> NetworkResult {
     let mut res = NetworkResult {
         result: false,
@@ -91,6 +109,11 @@ pub async fn delete_network(repo: &Repository, id: String) -> NetworkResult {
     return res;
 }
 
+/// Obtiene la topología completa actual persistida en base de datos.
+///
+/// Recupera tanto todas las redes como todos los Hubs que pertenecen a ellas.
+/// Se usa fundamentalmente durante el arranque del Edge para cargar
+/// el `NetworkManager` en memoria y restablecer el estado.
 pub async fn all_networks(repo: &Repository) -> AllNetworksResult {
     let mut result = AllNetworksResult {
         networks: None,

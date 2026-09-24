@@ -47,7 +47,6 @@ pub async fn create_table_alert_air(pool: &SqlitePool) -> Result<(), sqlx::Error
             sender_user_id       TEXT NOT NULL,
             destination_id       TEXT NOT NULL,
             timestamp            INTEGER NOT NULL,
-            network_id           TEXT NOT NULL,
             initial_air_quality      REAL NOT NULL,
             actual_air_quality       REAL NOT NULL
         );
@@ -95,7 +94,7 @@ pub async fn create_table_alert_air(pool: &SqlitePool) -> Result<(), sqlx::Error
 ///
 
 pub async fn insert_alert_air(
-    executor: impl sqlx::Executor<'_, Database = sqlx::Sqlite>,
+    pool: &SqlitePool,
     data_vec: &Vec<AlertAir>,
 ) -> Result<(), sqlx::Error> {
     if data_vec.is_empty() {
@@ -119,7 +118,7 @@ pub async fn insert_alert_air(
     });
 
     let query = query_builder.build();
-    query.execute(executor).await?;
+    query.execute(pool).await?;
 
     Ok(())
 }
@@ -154,8 +153,6 @@ pub async fn insert_alert_air(
 /// - La lógica específica del SQL se delega a [`pop_batch_generic`].
 ///
 
-pub async fn pop_batch_alert_air(
-    executor: impl sqlx::Executor<'_, Database = sqlx::Sqlite>,
-) -> Result<Vec<AlertAir>, sqlx::Error> {
-    pop_batch_generic(executor, "alert_air").await
+pub async fn pop_batch_alert_air(pool: &SqlitePool) -> Result<Vec<AlertAir>, sqlx::Error> {
+    pop_batch_generic(pool, "alert_air").await
 }

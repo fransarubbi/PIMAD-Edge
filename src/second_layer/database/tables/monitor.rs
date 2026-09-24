@@ -86,15 +86,7 @@ pub async fn create_table_monitor(pool: &SqlitePool) -> Result<(), sqlx::Error> 
 ///   (controlados por `BATCH_SIZE` en capas superiores).
 ///
 
-<<<<<<< HEAD:src/second_layer/database/tables/monitor.rs
 pub async fn insert_monitor(pool: &SqlitePool, data_vec: &Vec<Monitor>) -> Result<(), sqlx::Error> {
-=======
-pub async fn insert_monitor(
-    executor: impl sqlx::Executor<'_, Database = sqlx::Sqlite>,
-    data_vec: &Vec<Monitor>,
-) -> Result<(), sqlx::Error> {
-
->>>>>>> master:src/database/tables/monitor.rs
     if data_vec.is_empty() {
         return Ok(());
     }
@@ -118,7 +110,7 @@ pub async fn insert_monitor(
     });
 
     let query = query_builder.build();
-    query.execute(executor).await?;
+    query.execute(pool).await?;
 
     Ok(())
 }
@@ -153,8 +145,6 @@ pub async fn insert_monitor(
 /// - La lógica específica del SQL se delega a [`pop_batch_generic`].
 ///
 
-pub async fn pop_batch_monitor(
-    executor: impl sqlx::Executor<'_, Database = sqlx::Sqlite>,
-) -> Result<Vec<Monitor>, sqlx::Error> {
-    pop_batch_generic(executor, "monitor").await
+pub async fn pop_batch_monitor(pool: &SqlitePool) -> Result<Vec<Monitor>, sqlx::Error> {
+    pop_batch_generic(pool, "monitor").await
 }

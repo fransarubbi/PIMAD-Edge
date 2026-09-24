@@ -1,5 +1,9 @@
 [package]
+<<<<<<< HEAD
 name = "pimad_edge"
+=======
+name = "iot_edge_gateway"
+>>>>>>> master
 version = "0.28.0"
 edition = "2024"
 

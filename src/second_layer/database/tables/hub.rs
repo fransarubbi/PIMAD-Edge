@@ -85,6 +85,29 @@ pub async fn delete_hub_according_to_network(
     Ok(())
 }
 
+<<<<<<< HEAD:src/second_layer/database/tables/hub.rs
+=======
+
+/// Elimina un Hub específico basado en su identificador de usuario/dispositivo.
+///
+/// # Parámetros
+/// - `id`: El `sender_user_id` único del dispositivo.
+pub async fn delete_hub_according_to_id(pool: &SqlitePool, id: &str) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        DELETE FROM hub
+        WHERE id = ?
+        "#
+    )
+        .bind(id)
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
+
+>>>>>>> master:src/database/tables/hub.rs
 /// Recupera todos los Hubs registrados en el sistema.
 ///
 /// Mapea automáticamente las filas SQL a la estructura `HubRow`.

@@ -1198,6 +1198,37 @@ dependencies = [
 ]
 
 [[package]]
+<<<<<<< HEAD
+=======
+name = "iot_edge_gateway"
+version = "0.28.0"
+dependencies = [
+ "chrono",
+ "fastrand",
+ "futures",
+ "prost",
+ "rand 0.8.5",
+ "reqwest",
+ "rmp-serde",
+ "rumqttc",
+ "rustls 0.23.35",
+ "serde",
+ "sqlx",
+ "sysinfo",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "toml",
+ "tonic",
+ "tonic-build",
+ "tracing",
+ "tracing-subscriber",
+ "which",
+]
+
+[[package]]
+>>>>>>> master
 name = "ipnet"
 version = "2.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

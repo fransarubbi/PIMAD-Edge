@@ -55,7 +55,7 @@ pub enum NetworkServiceResponse {
 /// Orquestador y gestor de la topología de red.
 ///
 /// Encargado de cargar el estado inicial de las redes, mantener sincronizados
-/// los tópicos MQTT suscritos, evaluar peticiones de vinculación (Linkage) 
+/// los tópicos MQTT suscritos, evaluar peticiones de vinculación (Linkage)
 /// y aplicar cambios en la configuración enviados desde la nube.
 pub struct NetworkService {
     sender: mpsc::Sender<NetworkServiceResponse>,
@@ -437,7 +437,6 @@ async fn load_memory(
             let total_networks = manager.networks.len();
             match result.hubs {
                 Some(hub) => {
-                    let mut manager = app_context.net_man.write().await;
                     for hubs_row in hub {
                         let net_id = hubs_row.network_id.clone();
                         let hub = hubs_row.cast_to_hub();

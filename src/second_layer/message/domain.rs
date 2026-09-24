@@ -21,6 +21,7 @@ pub struct Measurement {
     #[sqlx(flatten)]
     #[serde(rename = "m")]
     pub metadata: Metadata,
+    #[sqlx(rename = "network_id")]
     #[serde(rename = "n")]
     pub network: String,
     #[serde(rename = "pc")]
@@ -41,6 +42,7 @@ pub struct AlertAir {
     #[sqlx(flatten)]
     #[serde(rename = "m")]
     pub metadata: Metadata,
+    #[sqlx(rename = "network_id")]
     #[serde(rename = "n")]
     pub network: String,
     #[serde(rename = "ia")]
@@ -55,6 +57,7 @@ pub struct AlertTh {
     #[sqlx(flatten)]
     #[serde(rename = "m")]
     pub metadata: Metadata,
+    #[sqlx(rename = "network_id")]
     #[serde(rename = "n")]
     pub network: String,
     #[serde(rename = "i")]
@@ -69,6 +72,7 @@ pub struct Monitor {
     #[sqlx(flatten)]
     #[serde(rename = "m")]
     pub metadata: Metadata,
+    #[sqlx(rename = "network_id")]
     #[serde(rename = "n")]
     pub network: String,
     #[serde(rename = "hf")]

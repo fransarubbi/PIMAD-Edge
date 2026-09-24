@@ -116,42 +116,27 @@ impl Repository {
     /// - Si ocurre un error, la operación se aborta y retorna el error.
     pub async fn insert(&self, tdv: &TableDataVector) -> Result<(), sqlx::Error> {
         debug!("insertando batch en base de datos");
-        let mut tx = self.pool.begin().await?;
-        
         if !tdv.measurement.is_empty() {
-            insert_measurement(&mut *tx, &tdv.measurement).await?;
+            insert_measurement(&self.pool, &tdv.measurement).await?;
         }
         if !tdv.monitor.is_empty() {
-            insert_monitor(&mut *tx, &tdv.monitor).await?;
+            insert_monitor(&self.pool, &tdv.monitor).await?;
         }
         if !tdv.alert_th.is_empty() {
-            insert_alert_temp(&mut *tx, &tdv.alert_th).await?;
+            insert_alert_temp(&self.pool, &tdv.alert_th).await?;
         }
         if !tdv.alert_air.is_empty() {
-            insert_alert_air(&mut *tx, &tdv.alert_air).await?;
+            insert_alert_air(&self.pool, &tdv.alert_air).await?;
         }
-        
-        tx.commit().await?;
         Ok(())
     }
 
     /// Extrae y elimina en batch de la base de datos.
     pub async fn pop_batch(&self) -> Result<TableDataVector, sqlx::Error> {
-<<<<<<< HEAD:src/second_layer/database/repository.rs
         let vec_measurement = pop_batch_measurement(&self.pool).await?;
         let vec_monitor = pop_batch_monitor(&self.pool).await?;
         let vec_alert_th = pop_batch_alert_temp(&self.pool).await?;
         let vec_alert_air = pop_batch_alert_air(&self.pool).await?;
-=======
-        let mut tx = self.pool.begin().await?;
-
-        let vec_measurement = pop_batch_measurement(&mut *tx).await?;
-        let vec_monitor = pop_batch_monitor(&mut *tx).await?;
-        let vec_alert_th = pop_batch_alert_temp(&mut *tx).await?;
-        let vec_alert_air = pop_batch_alert_air(&mut *tx).await?;
-
-        tx.commit().await?;
->>>>>>> master:src/database/repository.rs
 
         Ok(TableDataVector::new_pop(
             vec_measurement,
@@ -312,14 +297,7 @@ async fn init_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 /// Ejecuta un `DELETE ... RETURNING *` sobre la tabla indicada,
 /// devolviendo los registros eliminados como un vector del tipo `T`.
 ///
-<<<<<<< HEAD:src/second_layer/database/repository.rs
 pub async fn pop_batch_generic<T>(pool: &SqlitePool, table: &str) -> Result<Vec<T>, sqlx::Error>
-=======
-pub async fn pop_batch_generic<T>(
-    executor: impl sqlx::Executor<'_, Database = sqlx::Sqlite>,
-    table: &str,
-) -> Result<Vec<T>, sqlx::Error>
->>>>>>> master:src/database/repository.rs
 where
     T: for<'r> FromRow<'r, sqlx::sqlite::SqliteRow> + Send + Unpin + 'static,
 {
@@ -337,7 +315,7 @@ where
 
     let result = sqlx::query_as::<_, T>(&sql)
         .bind(LIMIT)
-        .fetch_all(executor)
+        .fetch_all(pool)
         .await?;
 
     Ok(result)

@@ -14,13 +14,13 @@ message FromEdge {
   string edge_id = 1;
   oneof payload {
     Measurement measurement = 2;
-    Monitor monitor = 3;
+    HubMonitor hub_monitor = 3;
     AlertAir alert_air = 4;
     AlertTh alert_th = 5;
-    SystemMetrics metrics = 6;
+    EdgeMonitor edge_monitor = 6;
     Settings settings = 7;
-    SettingOk setting_ok = 8;
-    FirmwareOutcome firmware_outcome = 9;
+    SettingsAck settings_ack = 8;
+    FirmwareHubResult firmware_hub_result = 9;
     HelloWorld hello_world = 10;
     MeasurementBatch measurement_batch = 11;
     MonitorBatch monitor_batch = 12;
@@ -29,7 +29,7 @@ message FromEdge {
     EdgeState edge_state = 15;
     NetworkAck network_ack = 16;
     HubState hub_state = 17;
-    FirmwareOutcomeError outcome_error = 18;
+    FirmwareEdgeResult firmware_edge_result = 18;
   }
 }
 
@@ -39,13 +39,12 @@ message FromEdge {
 message ToEdge {
   string edge_id = 1;
   oneof payload {
-    SettingOk setting_ok = 2;
+    SettingsAck settings_ack = 2;
     UpdateFirmware update_firmware = 3;
     Network network = 4;
-    DeleteHub delete_hub = 5;
-    Settings settings = 6;
-    Heartbeat heartbeat = 7;
-    HelloWorld hello_world = 8;
+    Settings settings = 5;
+    Heartbeat heartbeat = 6;
+    UpdateEdgeFirmware update_edge_firmware = 7;
   }
 }
 
@@ -79,7 +78,7 @@ message AlertTh {
   float actual_temp = 4;
 }
 
-message Monitor {
+message HubMonitor {
   Metadata metadata = 1;
   string network = 2;
   uint32 heap_free = 3;
@@ -99,7 +98,7 @@ message MeasurementBatch {
 }
 
 message MonitorBatch {
-  repeated Monitor monitors = 1;
+  repeated HubMonitor monitors = 1;
 }
 
 message AlertAirBatch {
@@ -122,7 +121,7 @@ message Settings {
   uint32 energy_mode = 9;
 }
 
-message SettingOk {
+message SettingsAck {
   Metadata metadata = 1;
   uint32 message_id = 2;
   string network = 3;
@@ -143,11 +142,6 @@ message NetworkAck {
   uint32 code_of_ack = 3;
 }
 
-message DeleteHub {
-  Metadata metadata = 1;
-  string network = 2;
-}
-
 message ActiveHub {
   Metadata metadata = 1;
   string network = 2;
@@ -164,16 +158,21 @@ message UpdateFirmware {
   string network = 2;
 }
 
-message FirmwareOutcome {
+message UpdateEdgeFirmware {
+    Metadata metadata = 1;
+    string version = 2;
+}
+
+message FirmwareEdgeResult {
+    Metadata metadata = 1;
+    bool error = 2;
+}
+
+message FirmwareHubResult {
   Metadata metadata = 1;
   string network = 2;
   float percentage_ok = 3;
-}
-
-message FirmwareOutcomeError {
-  Metadata metadata = 1;
-  string network = 2;
-  string error = 3;
+  string error = 4;
 }
 
 message HelloWorld {
@@ -181,7 +180,7 @@ message HelloWorld {
   bool hello = 2;
 }
 
-message SystemMetrics {
+message EdgeMonitor {
   Metadata metadata = 1;
   uint64 uptime_seconds = 2;
   float cpu_usage_percent = 3;

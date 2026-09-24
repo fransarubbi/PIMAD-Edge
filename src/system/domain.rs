@@ -6,17 +6,15 @@
 //! 3. **Configuración de Seguridad:** Estructuras para manejar certificados y configuración mTLS (`MtlsConfig`).
 //! 4. **Inicialización:** Estados de arranque y configuración de logging (`init_tracing`).
 
-
+use crate::first_layer::mqtt::domain::PayloadTopic;
+use crate::grpc::ToEdge;
+use serde::Deserialize;
 use std::io;
 use std::path::PathBuf;
-use serde::Deserialize;
 use thiserror::Error;
-use tracing_subscriber::{fmt, reload, EnvFilter, Registry};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use crate::grpc::ToEdge;
-use crate::mqtt::domain::PayloadTopic;
-
+use tracing_subscriber::{EnvFilter, Registry, fmt, reload};
 
 pub type TracingReloadHandle = reload::Handle<EnvFilter, Registry>;
 
@@ -42,7 +40,6 @@ pub struct System {
     /// Nivel de detalle de los logs (ej. `info`, `debug`, `warn`).
     pub rust_log: String,
 }
-
 
 /// Enumeración centralizada de todos los posibles errores del sistema.
 ///
@@ -84,7 +81,6 @@ pub enum ErrorType {
     Endpoint,
 }
 
-
 /// Eventos internos de conectividad y red.
 ///
 /// Se utilizan para notificar cambios en la conexión MQTT local o remota.
@@ -98,6 +94,20 @@ pub enum InternalEvent {
     IncomingGrpc(ToEdge),
 }
 
+impl InternalEvent {
+    pub fn server_connected(&self) -> bool {
+        match &self {
+            Self::ServerConnected => true,
+            _ => false,
+        }
+    }
+    pub fn local_connected(&self) -> bool {
+        match &self {
+            Self::LocalConnected => true,
+            _ => false,
+        }
+    }
+}
 
 /// Configuración para la seguridad de transporte (mTLS) del Broker.
 ///
@@ -114,7 +124,6 @@ pub struct MtlsConfig {
     pub connection_messages: bool,
 }
 
-
 /// Agrupación de rutas a los archivos de certificados X.509.
 #[derive(Debug, Default)]
 pub struct Certs {
@@ -123,13 +132,11 @@ pub struct Certs {
     pub keyfile: PathBuf,
 }
 
-
 /// Estados del proceso de arranque (Bootstrapping) del sistema.
 pub enum StateInit {
     CheckSystem,
     InitSystem,
 }
-
 
 /// Inicializa el sistema de logging y trazas (Tracing).
 ///
@@ -141,9 +148,8 @@ pub enum StateInit {
 /// - **Nivel:** Activado (muestra si es INFO, WARN, ERROR).
 
 pub fn init_tracing() -> TracingReloadHandle {
-
-    let initial_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let initial_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     let (filter_layer, reload_handle) = reload::Layer::new(initial_filter);
 

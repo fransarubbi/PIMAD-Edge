@@ -98,12 +98,10 @@ impl FirmwareService {
             child_token,
         ));
 
-        let child_token = token.child_token();
         tokio::spawn(edge_ota(
             rx_cmd_edge,
             self.message_handle.clone(),
             self.context.clone(),
-            child_token,
         ));
 
         let child_token = token.child_token();

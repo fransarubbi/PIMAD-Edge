@@ -53,7 +53,6 @@ pub async fn edge_ota(
     mut rx: mpsc::Receiver<UpdateEdgeFirmware>,
     handle: MessageHandle,
     app_context: AppContext,
-    cancel: CancellationToken,
 ) {
     while let Some(update) = rx.recv().await {
         if update.metadata.destination_id != app_context.system.id_edge {
@@ -92,8 +91,8 @@ pub async fn edge_ota(
                     handle.serialize_edge_firmware_result(update).await;
                     // Dormir 5 segundos para dar tiempo a que el mensaje gRPC salga
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    info!("iniciando apagado seguro para aplicar actualización OTA...");
-                    cancel.cancel();
+                    info!("iniciando apagado para aplicar actualización OTA...");
+                    std::process::exit(0);
                 } else {
                     info!("el sistema ya está en la última versión");
                     handle.serialize_edge_firmware_result(update).await;

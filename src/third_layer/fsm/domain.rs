@@ -28,7 +28,7 @@ use tracing::{debug, info, instrument};
 pub enum StateGlobal {
     Start,
     /// **Modo de Balanceo:** Fase crítica de negociación distribuida. El dispositivo
-    /// intenta sincronizarse con sus hubs, verificar quórum y establecer su rol.
+    /// intenta sincronizarse con sus hubs, verificar quórum y controlar el trafico.
     BalanceMode,
     /// **Operación Normal:** El dispositivo ha completado el balanceo exitosamente y opera en régimen estable.
     Normal,
@@ -36,7 +36,7 @@ pub enum StateGlobal {
     /// (DB corrupta, fallo de consenso repetido) para evitar operaciones inseguras.
     SafeMode,
     /// **Estad Desconectado:** Estado de transición luego de una pérdida de conexión MQTT.
-    /// Cuando se recupere la conexión, se iniciará el PCBPF.
+    /// Cuando se recupere la conexión, se iniciará el PCBPF de nuevo.
     Disconnected,
 }
 

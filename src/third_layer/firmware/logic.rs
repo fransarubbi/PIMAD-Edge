@@ -67,6 +67,7 @@ pub async fn edge_ota(
                     .repo_name("PIMAD-Edge")
                     .bin_name("pimad_edge")
                     .show_download_progress(false)
+                    .no_confirm(true)
                     .current_version(env!("CARGO_PKG_VERSION"))
                     .build()?
                     .update()?)

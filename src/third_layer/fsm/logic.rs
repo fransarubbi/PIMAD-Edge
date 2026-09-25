@@ -10,8 +10,8 @@ use crate::second_layer::message::{
 };
 use crate::system::domain::InternalEvent;
 use crate::third_layer::fsm::domain::{
-    Action, Event, FsmState, StateGlobal, StateOfSession, SubStateBalanceMode, SubStatePhase,
-    SubStateQuorum, Transition, UpdateSession, fsm_watchdog_timer,
+    Action, Event, FsmState, StateOfSession, SubStateBalanceMode, SubStatePhase, SubStateQuorum,
+    Transition, UpdateSession, fsm_watchdog_timer,
 };
 use crate::third_layer::quorum::domain::ProtocolSettings;
 use chrono::Utc;
@@ -20,6 +20,22 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, interval, sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument};
+
+enum State {
+    Start,
+    BalanceMode {
+        epoch: u32,
+        duration: u32,
+        frequency: u32,
+        jitter: u32,
+    },
+    Normal,
+    SafeMode {
+        frequency: u32,
+        jitter: u32,
+    },
+    Disconnected,
+}
 
 /// Manejador (`Handle`) ligero para comunicarse con el actor de la `FSM`.
 ///
@@ -116,7 +132,7 @@ impl FsmService {
         let mut handles = Vec::new();
 
         let (tx_command, rx_command) = mpsc::channel::<EventFsm>(50);
-        let (tx_to_edge_state, rx_from_fsm_to_edge) = mpsc::channel::<StateGlobal>(50);
+        let (tx_to_edge_state, rx_from_fsm_to_edge) = mpsc::channel::<State>(50);
         let (tx_to_fsm, rx_event) = mpsc::channel::<Event>(50);
         let (general_tx_to_timer, rx_from_general) = mpsc::channel::<Event>(50);
         let (general_tx_to_heartbeat, rx_heartbeat_from_general) = mpsc::channel::<Action>(50);
@@ -274,7 +290,7 @@ async fn handle_events_and_actions(
     tx_to_fsm: mpsc::Sender<Event>,
     tx_to_timer: mpsc::Sender<Event>,
     tx_to_heartbeat: mpsc::Sender<Action>,
-    tx_to_edge_state: mpsc::Sender<StateGlobal>,
+    tx_to_edge_state: mpsc::Sender<State>,
     mut rx_command: mpsc::Receiver<EventFsm>,
     mut rx_from_fsm: mpsc::Receiver<Vec<Action>>,
     app_context: AppContext,
@@ -406,7 +422,7 @@ async fn handle_action(
     tx_to_fsm: &mpsc::Sender<Event>,
     tx_to_timer: &mpsc::Sender<Event>,
     tx_to_heartbeat: &mpsc::Sender<Action>,
-    tx_to_edge_state: &mpsc::Sender<StateGlobal>,
+    tx_to_edge_state: &mpsc::Sender<State>,
     session: &mut UpdateSession,
     db_handle: &DataHandle,
     msg_handle: &MessageHandle,
@@ -415,13 +431,6 @@ async fn handle_action(
         Action::OnEntryBalance(sub_bm) => match sub_bm {
             SubStateBalanceMode::InitBalanceMode => {
                 debug!("entrando a init_balance_mode");
-                if tx_to_edge_state
-                    .send(StateGlobal::BalanceMode)
-                    .await
-                    .is_err()
-                {
-                    error!("no se pudo enviar StateGlobal::BalanceMode a edge_state");
-                }
                 let res: bool;
                 match db_handle.get_epoch().await {
                     Some(e) => {
@@ -433,6 +442,19 @@ async fn handle_action(
                 if res {
                     if tx_to_fsm.send(Event::BalanceEpochOk).await.is_err() {
                         error!("no se pudo enviar Event::BalanceEpochOk");
+                    }
+                    let jitter = fastrand::u32(0..=5);
+                    if tx_to_edge_state
+                        .send(State::BalanceMode {
+                            epoch: session.get_epoch(),
+                            duration: 300,
+                            frequency: app_context.quorum.get_frequency_phase(),
+                            jitter,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        error!("no se pudo enviar State::BalanceMode a edge_state");
                     }
                 } else {
                     if tx_to_fsm.send(Event::BalanceEpochNotOk).await.is_err() {
@@ -521,20 +543,31 @@ async fn handle_action(
         }
         Action::OnEntryNormal => {
             on_entry_normal(tx_to_heartbeat).await;
-            if tx_to_edge_state.send(StateGlobal::Normal).await.is_err() {
-                error!("no se pudo enviar StateGlobal::Normal a edge_state");
+            if tx_to_edge_state.send(State::Normal).await.is_err() {
+                error!("no se pudo enviar State::Normal a edge_state");
             }
         }
         Action::OnEntrySafeMode => {
             session.reset_empty_hash();
             session.set_state(StateOfSession::SafeMode);
             on_entry_safe_mode(tx_to_timer, tx_to_heartbeat, app_context).await;
-            if tx_to_edge_state.send(StateGlobal::SafeMode).await.is_err() {
-                error!("no se pudo enviar StateGlobal::SafeMode a edge_state");
+            let frequency = app_context.quorum.get_frequency_safe_mode();
+            let jitter = fastrand::u32(0..=5);
+            if tx_to_edge_state
+                .send(State::SafeMode { frequency, jitter })
+                .await
+                .is_err()
+            {
+                error!("no se pudo enviar State::SafeMode a edge_state");
             }
         }
         Action::CalculateQuorum => {
             quorum_algorithm(session, tx_to_fsm, app_context).await;
+        }
+        Action::OnEntryDisconnected => {
+            if tx_to_edge_state.send(State::Disconnected).await.is_err() {
+                error!("no se pudo enviar State::Disconnected a edge_state");
+            }
         }
         Action::StopTimer => {
             if tx_to_timer.send(Event::StopTimer).await.is_err() {
@@ -735,13 +768,13 @@ pub async fn heartbeat_generator(
 /// * `rx_command`: Mensajes de tipo StateGlobal proveniente de `handle_action`.
 ///
 #[instrument(name = "edge_state", skip_all)]
-pub async fn edge_state(
-    handle: MessageHandle,
-    mut rx_command: mpsc::Receiver<StateGlobal>,
+async fn edge_state(
+    msg_handle: MessageHandle,
+    mut rx_command: mpsc::Receiver<State>,
     app_context: AppContext,
     cancel: CancellationToken,
 ) {
-    let mut state: StateGlobal = StateGlobal::Start;
+    let mut state: State = State::Start;
     let mut ticker = interval(Duration::from_secs(10));
 
     loop {
@@ -753,30 +786,32 @@ pub async fn edge_state(
 
             _ = ticker.tick() => {
                 match state {
-                    StateGlobal::BalanceMode => {
+                    State::BalanceMode { epoch, duration, frequency, jitter } => {
                         let metadata = build_metadata(&app_context, "all");
                         let data = EdgeState {
                             metadata: metadata.clone(),
                             state: "Balance".to_string(),
                         };
-                        handle.serialize_edge_state(data).await;
+                        msg_handle.serialize_edge_state(data).await;
                         let state = StateToHub {
                             metadata,
                             state: "balance".to_string(),
-                            balance_epoch: 0,
-                            duration: 0,
-                            frequency: 0,
-                            jitter: 0,
+                            balance_epoch: epoch,
+                            duration,
+                            frequency,
+                            jitter,
                         };
-                        handle.serialize_state_hub(state).await;
+                        msg_handle.serialize_state_hub(state).await;
                     },
-                    StateGlobal::Normal => {
+                    // En estado Normal no se requieren los datos balance_epoch, duration, frequency ni jitter. Por ende, se ponen
+                    // valores cero para completar la estructura del mensaje, pero no seran analizados por los Hubs.
+                    State::Normal => {
                         let metadata = build_metadata(&app_context, "all");
                         let data = EdgeState {
                             metadata: metadata.clone(),
                             state: "Normal".to_string(),
                         };
-                        handle.serialize_edge_state(data).await;
+                        msg_handle.serialize_edge_state(data).await;
                         let state = StateToHub {
                             metadata,
                             state: "normal".to_string(),
@@ -785,43 +820,34 @@ pub async fn edge_state(
                             frequency: 0,
                             jitter: 0,
                         };
-                        handle.serialize_state_hub(state).await;
+                        msg_handle.serialize_state_hub(state).await;
                     }
-                    StateGlobal::SafeMode => {
+                    // En estado Normal no se requieren los datos balance_epoch ni duration. Por ende, se ponen
+                    // valores cero para completar la estructura del mensaje, pero no seran analizados por los Hubs.
+                    State::SafeMode { frequency, jitter } => {
                         let metadata = build_metadata(&app_context, "all");
                         let data = EdgeState {
                             metadata: metadata.clone(),
                             state: "SafeMode".to_string(),
                         };
-                        handle.serialize_edge_state(data).await;
-                        let jitter = fastrand::u32(0..=5);
+                        msg_handle.serialize_edge_state(data).await;
                         let state = StateToHub {
                             metadata: metadata.clone(),
                             state: "safe".to_string(),
                             balance_epoch: 0,
                             duration: 0,
-                            frequency: app_context.quorum.get_frequency_safe_mode(),
+                            frequency,
                             jitter,
                         };
-                        handle.serialize_state_hub(state).await;
+                        msg_handle.serialize_state_hub(state).await;
                     }
+                    State::Disconnected => debug!("en estado Disconnected no hay nada para mandar!"),
                     _ => {}
                 }
             }
 
             Some(msg) = rx_command.recv() => {
-                match msg {
-                    StateGlobal::BalanceMode => {
-                        state = StateGlobal::BalanceMode;
-                    },
-                    StateGlobal::Normal => {
-                        state = StateGlobal::Normal;
-                    },
-                    StateGlobal::SafeMode => {
-                        state = StateGlobal::SafeMode;
-                    }
-                    _ => {}
-                }
+                state = msg;
             }
         }
     }

@@ -185,7 +185,7 @@ impl MessageHandle {
     }
 }
 
-/// Representa las respuestas y mensajes decodificados que genera el `MessageService` 
+/// Representa las respuestas y mensajes decodificados que genera el `MessageService`
 /// para ser entregados al middleware de la capa 2.
 pub enum MessageServiceResponse {
     /// Un mensaje originado en la red local (Hub).
@@ -252,6 +252,7 @@ impl MessageService {
                 Some(msg) = self.rx.recv() => {
                     match msg {
                         InternalMessageCommand::SerializeUpdateHubFirmware { ref data } => {
+                            debug!("serializando mensaje UpdateHubFirmware para un hub");
                             let id_net = data.network.clone();
                             let topic = {
                                 let manager = self.context.net_man.read().await;
@@ -269,6 +270,7 @@ impl MessageService {
                             }
                         }
                         InternalMessageCommand::SerializeNewConfigHub { ref data } => {
+                            debug!("serializando mensaje NewConfigHub para un hub");
                             let id_net = data.network.clone();
                             let topic = {
                                 let manager = self.context.net_man.read().await;
@@ -286,6 +288,7 @@ impl MessageService {
                             }
                         }
                         InternalMessageCommand::SerializeAckConfigHub { ref data } => {
+                            debug!("serializando mensaje AckConfigHub para un hub");
                             let id_net = data.network.clone();
                             let topic = {
                                 let manager = self.context.net_man.read().await;
@@ -303,6 +306,7 @@ impl MessageService {
                             }
                         }
                         InternalMessageCommand::SerializeHeartbeatHub { data } => {
+                            debug!("serializando mensaje Heartbeat para los hubs");
                             let topic = {
                                 let manager = self.context.net_man.read().await;
                                 Some((
@@ -319,6 +323,7 @@ impl MessageService {
                             }
                         }
                         InternalMessageCommand::SerializeHandshakeHub { data } => {
+                            debug!("serializando mensaje HandshakeToHub para los hubs");
                             let topic = {
                                 let manager = self.context.net_man.read().await;
                                 Some((
@@ -335,6 +340,7 @@ impl MessageService {
                             }
                         }
                         InternalMessageCommand::SerializePhaseHub { data } => {
+                            debug!("serializando mensaje Phase para los hubs");
                             let topic = {
                                 let manager = self.context.net_man.read().await;
                                 Some((
@@ -351,6 +357,7 @@ impl MessageService {
                             }
                         }
                         InternalMessageCommand::SerializeStateHub { data } => {
+                            debug!("serializando mensaje StateHub para los hubs");
                             let topic = {
                                 let manager = self.context.net_man.read().await;
                                 Some((
@@ -367,6 +374,7 @@ impl MessageService {
                             }
                         }
                         InternalMessageCommand::SerializeLinkageHub { data } => {
+                            debug!("serializando mensaje LinkageAck para un hub");
                             let topic = {
                                 let manager = self.context.net_man.read().await;
                                 Some((
@@ -384,8 +392,10 @@ impl MessageService {
                         }
                         InternalMessageCommand::IsServerLive { data } => {
                             if data {
+                                debug!("recibiendo comando de ServerConnected");
                                 server_status = InternalEvent::ServerConnected;
                             } else {
+                                debug!("recibiendo comando de ServerDisconnected");
                                 server_status = InternalEvent::ServerDisconnected;
                             }
                         }
